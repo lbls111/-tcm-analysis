@@ -349,3 +349,39 @@ export const getHerbInfo = (inputName: string): {
 
   return { coreName: inputName, processing: '', data: null, mappedFrom };
 };
+
+// ==========================================
+// 7. AI Search Helper
+// ==========================================
+export const searchHerbsForAI = (query: string): string => {
+    const term = query.trim();
+    if (!term) return "请提供有效的查询关键词。";
+
+    // Filter herbs that match query in name, alias, efficacy, or nature/flavor
+    const matches = FULL_HERB_LIST.filter(h => {
+        const aliasMatch = Object.entries(HERB_ALIASES).some(([alias, core]) => 
+            (alias.includes(term) && core === h.name)
+        );
+        return h.name.includes(term) || 
+               (h.efficacy && h.efficacy.includes(term)) ||
+               (h.nature && h.nature.includes(term)) ||
+               (h.category && h.category.includes(term)) || // Support searching by category
+               aliasMatch;
+    }).slice(0, 8); // Limit to top 8
+
+    if (matches.length === 0) {
+        return `未在当前数据库中找到与 "${term}" 匹配的药材。请尝试更通用的关键词，或检查是否有别名。`;
+    }
+
+    // Format as lightweight JSON
+    const results = matches.map(h => ({
+        name: h.name,
+        nature: h.nature,
+        flavors: h.flavors,
+        meridians: h.meridians,
+        efficacy: h.efficacy ? h.efficacy.substring(0, 150) + (h.efficacy.length > 150 ? '...' : '') : '暂无',
+        usage: h.usage
+    }));
+
+    return JSON.stringify(results, null, 2);
+};

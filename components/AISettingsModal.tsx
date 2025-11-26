@@ -2,6 +2,8 @@
 
 
 
+
+
 import React, { useState } from 'react';
 import { AISettings } from '../types';
 import { fetchAvailableModels, testModelConnection, DEFAULT_ANALYZE_SYSTEM_INSTRUCTION } from '../services/openaiService';
@@ -233,7 +235,6 @@ export const AISettingsModal: React.FC<Props> = ({ isOpen, onClose, settings, on
                         <div className="space-y-2">
                             <label className="text-sm font-bold text-slate-700 flex justify-between">
                                 <span>AI 深度推演模型</span>
-                                <span className="text-[10px] text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">建议 GPT-4 / Claude-3.5-Sonnet</span>
                             </label>
                             {localSettings.availableModels.length > 0 ? (
                                 <select 
@@ -260,7 +261,6 @@ export const AISettingsModal: React.FC<Props> = ({ isOpen, onClose, settings, on
                         <div className="space-y-2">
                             <label className="text-sm font-bold text-slate-700 flex justify-between">
                                 <span>AI 问答助手模型</span>
-                                <span className="text-[10px] text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">建议 GPT-3.5 / 4o-mini</span>
                             </label>
                             {localSettings.availableModels.length > 0 ? (
                                 <select 

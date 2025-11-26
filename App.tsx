@@ -1,6 +1,5 @@
-
-import React, { useState, useEffect, useRef } from 'react';
-import { analyzePrescriptionWithAI, generateHerbDataWithAI, DEFAULT_ANALYZE_SYSTEM_INSTRUCTION } from './services/openaiService';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { analyzePrescriptionWithAI, generateHerbDataWithAI, DEFAULT_ANALYZE_SYSTEM_INSTRUCTION, QUICK_ANALYZE_SYSTEM_INSTRUCTION } from './services/openaiService';
 import { calculatePrescription, getPTILabel } from './utils/tcmMath';
 import { parsePrescription } from './utils/prescriptionParser';
 import { AnalysisResult, ViewMode, Constitution, AdministrationMode, BenCaoHerb, AISettings } from './types';
@@ -14,9 +13,17 @@ import { DEFAULT_SUPABASE_URL, DEFAULT_SUPABASE_KEY } from './constants';
 
 const PRESET_PRESCRIPTION = "";
 const LS_REPORTS_KEY = "logicmaster_reports";
+const LS_REPORTS_META_KEY = "logicmaster_reports_meta";
 const LS_SETTINGS_KEY = "logicmaster_settings";
 const LS_AI_SETTINGS_KEY = "logicmaster_ai_settings";
 const DEFAULT_API_URL = "https://lbls888-lap.hf.space/v1";
+
+type ReportMode = 'quick' | 'deep';
+
+interface ReportMeta {
+  mode: ReportMode;
+  timestamp: number;
+}
 
 const sortVersions = (versions: string[]) => {
   return versions.sort((a, b) => {
@@ -33,10 +40,9 @@ function App() {
   const [aiError, setAiError] = useState<string | null>(null);
   const [autoFillingHerb, setAutoFillingHerb] = useState<string | null>(null);
   const [reports, setReports] = useState<Record<string, string>>({});
+  const [reportMeta, setReportMeta] = useState<Record<string, ReportMeta>>({});
   const [activeReportVersion, setActiveReportVersion] = useState<string>('V1');
   const [isReportIncomplete, setIsReportIncomplete] = useState(false);
-  
-  // Removed hardcoded constitution and adminMode constants as per user request
   
   const [fontSettings, setFontSettings] = useState({
     family: 'font-serif-sc', 
@@ -46,8 +52,8 @@ function App() {
   const [aiSettings, setAiSettings] = useState<AISettings>({
     apiKey: '',
     apiBaseUrl: DEFAULT_API_URL,
-    analysisModel: 'gpt-4o',
-    chatModel: 'gpt-3.5-turbo',
+    analysisModel: '', // Empty by default
+    chatModel: '', // Empty by default
     availableModels: [],
     systemInstruction: DEFAULT_ANALYZE_SYSTEM_INSTRUCTION,
     temperature: 0,
@@ -69,16 +75,22 @@ function App() {
 
   useEffect(() => {
     const savedReports = localStorage.getItem(LS_REPORTS_KEY);
+    const savedMeta = localStorage.getItem(LS_REPORTS_META_KEY);
+    
     if (savedReports) {
       try {
         const parsedReports = JSON.parse(savedReports);
+        const parsedMeta = savedMeta ? JSON.parse(savedMeta) : {};
+        
         if (parsedReports && typeof parsedReports === 'object' && Object.keys(parsedReports).length > 0) {
           setReports(parsedReports);
+          setReportMeta(parsedMeta);
           const sortedVersions = sortVersions(Object.keys(parsedReports));
           setActiveReportVersion(sortedVersions[sortedVersions.length - 1] || 'V1');
         }
       } catch (e) {
         localStorage.removeItem(LS_REPORTS_KEY);
+        localStorage.removeItem(LS_REPORTS_META_KEY);
       }
     }
 
@@ -96,8 +108,8 @@ function App() {
         setAiSettings({
           apiKey: parsed.apiKey || '',
           apiBaseUrl: parsed.apiBaseUrl || DEFAULT_API_URL,
-          analysisModel: parsed.analysisModel || 'gpt-4o',
-          chatModel: parsed.chatModel || 'gpt-3.5-turbo',
+          analysisModel: parsed.analysisModel || '',
+          chatModel: parsed.chatModel || '',
           availableModels: parsed.availableModels || [],
           systemInstruction: DEFAULT_ANALYZE_SYSTEM_INSTRUCTION, 
           temperature: parsed.temperature ?? 0,
@@ -117,10 +129,12 @@ function App() {
   useEffect(() => {
     if (Object.keys(reports).length > 0) {
       localStorage.setItem(LS_REPORTS_KEY, JSON.stringify(reports));
+      localStorage.setItem(LS_REPORTS_META_KEY, JSON.stringify(reportMeta));
     } else {
       localStorage.removeItem(LS_REPORTS_KEY);
+      localStorage.removeItem(LS_REPORTS_META_KEY);
     }
-  }, [reports]);
+  }, [reports, reportMeta]);
 
   useEffect(() => {
     localStorage.setItem(LS_SETTINGS_KEY, JSON.stringify(fontSettings));
@@ -140,10 +154,41 @@ function App() {
     }
   }, [activeReportVersion, reports, view]);
 
+  // =========================================================
+  // Herb Recognition Logic for Report (Memoized)
+  // =========================================================
+  const herbRegex = useMemo(() => {
+      const names = FULL_HERB_LIST.map(h => h.name).sort((a, b) => b.length - a.length);
+      if (names.length === 0) return null;
+      const escaped = names.map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+      return new RegExp(`(${escaped.join('|')})`, 'g');
+  }, [FULL_HERB_LIST.length]);
+
+  const processReportContent = (html: string) => {
+      if (!herbRegex || !html) return html;
+      const parts = html.split(/(<[^>]+>)/g);
+      return parts.map(part => {
+          if (part.startsWith('<')) return part;
+          return part.replace(herbRegex, (match) => 
+              `<span class="herb-link cursor-pointer text-indigo-700 font-bold border-b border-indigo-200 hover:bg-indigo-50 hover:border-indigo-500 transition-colors px-0.5 rounded-sm" data-herb-name="${match}">${match}</span>`
+          );
+      }).join('');
+  };
+
+  const handleReportClick = (e: React.MouseEvent<HTMLDivElement>) => {
+      const target = e.target as HTMLElement;
+      const herbSpan = target.closest('[data-herb-name]');
+      if (herbSpan) {
+          const herbName = herbSpan.getAttribute('data-herb-name');
+          if (herbName) {
+              handleHerbClick(herbName);
+          }
+      }
+  };
+
   const handleStartCalculation = () => {
     try {
       const herbs = parsePrescription(input);
-      // Removed adminMode and constitution arguments
       const result = calculatePrescription(herbs);
       setAnalysis(result);
       setInitialDosageRef(result.initialTotalDosage); 
@@ -159,7 +204,6 @@ function App() {
           abortControllerRef.current.abort();
           abortControllerRef.current = null;
           setAiLoading(false);
-          // Optional: Add a message indicating stopped
           setReports(prev => {
               const current = prev[activeReportVersion] || '';
               return { ...prev, [activeReportVersion]: current + "\n\n<!-- 生成已由用户手动停止 -->" };
@@ -167,7 +211,20 @@ function App() {
       }
   };
 
-  const handleAskAI = async (regenerateInstructions?: string) => {
+  const handleResetCurrentVersion = () => {
+      if (!activeReportVersion) return;
+      if (!window.confirm("确定要重置当前版本吗？\n当前内容将被清空，您可以重新选择【深度推演】或【快速审核】模式。")) return;
+      
+      setReports(prev => ({
+          ...prev,
+          [activeReportVersion]: '' // Set to empty string to trigger Selection UI
+      }));
+      setIsReportIncomplete(false);
+      setAiError(null);
+  };
+
+  // Updated handleAskAI to support Quick/Deep modes with correct versioning logic
+  const handleAskAI = async (mode: 'deep' | 'quick' | 'regenerate', regenerateInstructions?: string) => {
     if (!analysis) return;
 
     if (!aiSettings.apiKey) {
@@ -180,13 +237,57 @@ function App() {
     setAiLoading(true);
     setAiError(null);
 
-    // Create new abort controller
     const controller = new AbortController();
     abortControllerRef.current = controller;
 
-    const newVersionKey = `V${Object.keys(reports).length + 1}`;
-    setActiveReportVersion(newVersionKey);
-    setReports(prev => ({ ...prev, [newVersionKey]: '' })); // Initialize for streaming
+    // Determine Version and System Prompt
+    let versionToUse = activeReportVersion;
+    let targetMode: ReportMode = 'deep';
+    let sysPrompt = DEFAULT_ANALYZE_SYSTEM_INSTRUCTION;
+
+    // Smart Reuse Logic: If current version exists but is empty/reset, reuse it.
+    const isCurrentVersionEmpty = activeReportVersion && (!reports[activeReportVersion] || reports[activeReportVersion].trim() === '');
+
+    if (mode === 'regenerate') {
+        // Regenerate Mode (Usually called by Chatbot Tool): Reuse current version slot
+        versionToUse = activeReportVersion;
+        targetMode = reportMeta[versionToUse]?.mode || 'deep';
+        
+        if (targetMode === 'quick') {
+            sysPrompt = QUICK_ANALYZE_SYSTEM_INSTRUCTION;
+        }
+        // Clear content before start
+        setReports(prev => ({ ...prev, [versionToUse]: '' }));
+
+    } else {
+        // Mode Selection (Deep / Quick)
+        if (isCurrentVersionEmpty) {
+            // Reuse the existing empty slot
+            versionToUse = activeReportVersion;
+        } else {
+            // Create NEW version (V + maxIndex + 1)
+            const existingVersions = Object.keys(reports);
+            const maxVer = existingVersions.reduce((max, key) => {
+               const num = parseInt(key.replace(/^V/, '')) || 0;
+               return Math.max(max, num);
+            }, 0);
+            versionToUse = `V${maxVer + 1}`;
+        }
+        
+        targetMode = mode;
+        if (targetMode === 'quick') {
+            sysPrompt = QUICK_ANALYZE_SYSTEM_INSTRUCTION;
+        }
+
+        setActiveReportVersion(versionToUse);
+        setReports(prev => ({ ...prev, [versionToUse]: '' }));
+    }
+
+    // Update Meta
+    setReportMeta(prev => ({
+        ...prev,
+        [versionToUse]: { mode: targetMode, timestamp: Date.now() }
+    }));
 
     try {
       const stream = analyzePrescriptionWithAI(
@@ -195,13 +296,14 @@ function App() {
         aiSettings,
         regenerateInstructions,
         undefined,
-        controller.signal
+        controller.signal,
+        sysPrompt // Pass specific prompt
       );
 
       let htmlContent = '';
       for await (const chunk of stream) {
         htmlContent += chunk;
-        setReports(prev => ({ ...prev, [newVersionKey]: htmlContent }));
+        setReports(prev => ({ ...prev, [versionToUse]: htmlContent }));
       }
 
       const isComplete = htmlContent.trim().endsWith('</html>');
@@ -214,15 +316,13 @@ function App() {
       }
       console.error(err);
       setAiError(err.message || "请求 AI 时发生未知错误");
-      setReports(prev => {
-        const newReports = { ...prev };
-        delete newReports[newVersionKey];
-        const remainingKeys = Object.keys(newReports);
-        if (remainingKeys.length > 0) {
-          setActiveReportVersion(sortVersions(remainingKeys)[remainingKeys.length - 1]);
-        }
-        return newReports;
-      });
+      
+      // If it was a NEW version and failed completely, maybe remove it?
+      if (mode !== 'regenerate' && !reports[versionToUse]) {
+          // If we reused an empty slot, maybe don't delete? 
+          // But if we created V2 and it failed, we might want to revert.
+          // For now, keep it simple.
+      }
     } finally {
       setAiLoading(false);
       abortControllerRef.current = null;
@@ -235,10 +335,13 @@ function App() {
     setAiLoading(true);
     setAiError(null);
     
-    // Create new abort controller
     const controller = new AbortController();
     abortControllerRef.current = controller;
     
+    // Determine which prompt to use based on the report's mode
+    const currentMode = reportMeta[activeReportVersion]?.mode || 'deep';
+    const sysPrompt = currentMode === 'quick' ? QUICK_ANALYZE_SYSTEM_INSTRUCTION : DEFAULT_ANALYZE_SYSTEM_INSTRUCTION;
+
     try {
       const partialReport = reports[activeReportVersion];
       
@@ -248,7 +351,8 @@ function App() {
         aiSettings,
         undefined,
         partialReport,
-        controller.signal
+        controller.signal,
+        sysPrompt // IMPORTANT: Pass the correct prompt for continuity
       );
 
       let finalContent = partialReport;
@@ -261,10 +365,7 @@ function App() {
       setIsReportIncomplete(!isNowComplete);
 
     } catch (err: any) {
-      if (err.name === 'AbortError') {
-        console.log('AI continuation aborted by user');
-        return;
-      }
+      if (err.name === 'AbortError') return;
       console.error(err);
       setAiError(err.message || "续写报告时发生错误。");
     } finally {
@@ -301,7 +402,7 @@ function App() {
     setInput(newPrescription);
     try {
       const herbs = parsePrescription(newPrescription);
-      const result = calculatePrescription(herbs); // Removed params
+      const result = calculatePrescription(herbs);
       setAnalysis(result);
       setInitialDosageRef(result.initialTotalDosage);
     } catch (e) {
@@ -322,20 +423,32 @@ function App() {
   };
 
   const handleDeleteReportVersion = () => {
-    if (!activeReportVersion || !reports[activeReportVersion]) return;
-  
+    // Correct check: check if the key exists in the object, not if the value is truthy.
+    // An empty report (value='') is still a valid version that can be deleted.
+    if (!activeReportVersion || !(activeReportVersion in reports)) return;
+    
+    if (!window.confirm(`确定要删除版本 ${activeReportVersion} 吗？`)) return;
+    
+    // Remove from reports
     const newReports = { ...reports };
     delete newReports[activeReportVersion];
-    
     setReports(newReports);
-  
+
+    // Remove from meta
+    const newMeta = { ...reportMeta };
+    delete newMeta[activeReportVersion];
+    setReportMeta(newMeta);
+
+    // Determine next active version
     const remainingVersions = Object.keys(newReports);
     if (remainingVersions.length > 0) {
-      const sorted = sortVersions(remainingVersions);
-      setActiveReportVersion(sorted[sorted.length - 1]); 
+        const sorted = sortVersions(remainingVersions);
+        // Switch to the last available version
+        setActiveReportVersion(sorted[sorted.length - 1]); 
     } else {
-      setActiveReportVersion('');
-      setIsReportIncomplete(false);
+        // No reports left, reset to empty to show Selection UI
+        setActiveReportVersion('');
+        setIsReportIncomplete(false);
     }
   };
 
@@ -347,7 +460,6 @@ function App() {
     if (!found) {
         found = FULL_HERB_LIST.find(h => herbName.startsWith(h.name) || h.name.startsWith(herbName));
     }
-
     if (found) {
         setViewingHerb(found);
     } else {
@@ -356,96 +468,94 @@ function App() {
   };
 
   const getTempBadgeStyle = (temp: string) => {
-    if (temp.includes('大热') || temp.includes('热')) return 'bg-red-100 text-red-800 border-red-200';
-    if (temp.includes('温')) return 'bg-pink-100 text-pink-800 border-pink-200';
-    if (temp.includes('寒')) return 'bg-blue-100 text-blue-800 border-blue-200';
-    if (temp.includes('凉')) return 'bg-cyan-100 text-cyan-800 border-cyan-200';
-    return 'bg-emerald-100 text-emerald-800 border-emerald-200';
+    if (temp.includes('大热') || temp.includes('热')) return 'bg-rose-100 text-rose-700 border-rose-200';
+    if (temp.includes('温')) return 'bg-orange-100 text-orange-700 border-orange-200';
+    if (temp.includes('寒')) return 'bg-indigo-100 text-indigo-700 border-indigo-200';
+    if (temp.includes('凉')) return 'bg-cyan-100 text-cyan-700 border-cyan-200';
+    return 'bg-emerald-100 text-emerald-700 border-emerald-200';
   };
 
   const renderCalculationTable = (targetAnalysis: AnalysisResult) => {
     if (!targetAnalysis) return null;
 
     return (
-      <div className="overflow-x-auto rounded-2xl border border-slate-200 shadow-lg bg-white mt-4">
-        <table className="w-full text-left">
-          <thead className="bg-slate-50 text-slate-600 font-bold text-xs uppercase tracking-wider border-b border-slate-200">
+      <div className="overflow-hidden rounded-2xl border border-slate-200 shadow-xl bg-white/80 backdrop-blur-xl">
+        <div className="p-6 bg-white/50 border-b border-slate-100">
+           <h3 className="text-xl font-bold text-slate-800 flex items-center gap-2">
+              <span className="w-1.5 h-6 bg-indigo-600 rounded-full"></span> 处方物理明细
+           </h3>
+        </div>
+        <div className="overflow-x-auto">
+        <table className="w-full text-left border-collapse">
+          <thead className="bg-slate-50 text-slate-500 font-bold text-xs uppercase tracking-wider border-b border-slate-200">
             <tr>
               <th className="px-6 py-4">药名 (Herb)</th>
               <th className="px-6 py-4 text-right">剂量 (g)</th>
-              <th className="px-6 py-4 text-center">HV(修正)</th>
-              <th className="px-6 py-4 text-right">PTI</th>
-              <th className="px-6 py-4 text-right text-slate-400">向量(Vector)</th>
+              <th className="px-6 py-4 text-center">药性/能值</th>
+              <th className="px-6 py-4 text-right">PTI 贡献</th>
+              <th className="px-6 py-4 text-right text-slate-400">矢量 (Vector)</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-slate-100 text-sm">
-            {targetAnalysis.herbs.map((h) => {
+          <tbody className="divide-y divide-slate-50 text-sm">
+            {targetAnalysis.herbs.map((h, i) => {
               const isLinked = !!h.staticData;
               return (
-                <tr key={h.id} className="hover:bg-indigo-50/30 transition-colors">
-                  <td className="px-6 py-3 font-bold text-slate-800">
+                <tr key={h.id} className={`hover:bg-indigo-50/40 transition-colors ${i % 2 === 0 ? 'bg-white' : 'bg-slate-50/30'}`}>
+                  <td className="px-6 py-4 font-bold text-slate-800">
                      <div 
                         className={`flex flex-col ${isLinked ? 'cursor-pointer group' : ''}`}
                         onClick={() => isLinked && handleHerbClick(h.name, h.mappedFrom)}
                      >
                         <div className="flex items-center gap-2">
-                           <span className={`${isLinked ? 'text-indigo-900 group-hover:text-indigo-600 group-hover:underline' : 'text-slate-800'}`}>
+                           <span className={`text-base ${isLinked ? 'text-slate-800 group-hover:text-indigo-600' : 'text-slate-600'}`}>
                              {h.name}
                            </span>
                            {isLinked && (
-                             <span className="bg-indigo-50 text-indigo-600 text-[10px] px-1.5 py-0.5 rounded border border-indigo-100 group-hover:bg-indigo-100 transition-colors">
-                               药典
+                             <span className="opacity-0 group-hover:opacity-100 transition-opacity text-[10px] text-indigo-400">
+                               ↗
                              </span>
                            )}
+                           {!isLinked && (
+                                <button 
+                                onClick={(e) => { e.stopPropagation(); handleAutoFillHerb(h.name); }}
+                                disabled={autoFillingHerb === h.name}
+                                className="text-[10px] bg-indigo-100 text-indigo-600 px-1.5 py-0.5 rounded hover:bg-indigo-200 transition"
+                                >
+                                {autoFillingHerb === h.name ? '...' : 'AI补全'}
+                                </button>
+                           )}
                         </div>
-                        {h.mappedFrom && h.mappedFrom !== h.name && (
-                           <span className="text-[10px] text-slate-400 mt-0.5">
-                             输入: {h.mappedFrom}
-                           </span>
-                        )}
-                        {!isLinked && (
-                             <div className="flex items-center gap-2 mt-1">
-                                 <span className="text-[10px] text-red-400 flex items-center gap-1">⚠️ 未收录</span>
-                                 <button 
-                                    onClick={(e) => {
-                                        e.stopPropagation();
-                                        handleAutoFillHerb(h.name);
-                                    }}
-                                    disabled={autoFillingHerb === h.name}
-                                    className="bg-indigo-600 hover:bg-indigo-700 text-white text-[10px] px-2 py-0.5 rounded shadow-sm transition-all flex items-center gap-1"
-                                 >
-                                    {autoFillingHerb === h.name ? '⏳ 补全中...' : '✨ AI 补全'}
-                                 </button>
-                             </div>
-                        )}
                      </div>
                   </td>
-                  <td className="px-6 py-3 text-right font-mono">
+                  <td className="px-6 py-4 text-right font-mono text-slate-600">
                     {h.dosageGrams}
                   </td>
-                  <td className="px-6 py-3 text-center">
-                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${getTempBadgeStyle(h.displayTemperature)}`}>
-                      {h.displayTemperature} ({h.hvCorrected.toFixed(1)})
+                  <td className="px-6 py-4 text-center">
+                    <span className={`px-3 py-1 rounded-full text-xs font-bold border ${getTempBadgeStyle(h.displayTemperature)}`}>
+                      {h.displayTemperature} <span className="opacity-50 mx-1">|</span> {h.hvCorrected.toFixed(1)}
                     </span>
                   </td>
-                  <td className={`px-6 py-3 text-right font-mono font-bold ${h.ptiContribution > 0 ? 'text-red-600' : 'text-blue-600'}`}>
+                  <td className={`px-6 py-4 text-right font-mono font-bold ${h.ptiContribution > 0 ? 'text-rose-500' : 'text-blue-500'}`}>
                     {h.ptiContribution > 0 ? '+' : ''}{h.ptiContribution.toFixed(2)}
                   </td>
-                  <td className="px-6 py-3 text-right font-mono text-xs text-slate-500">
-                     X:{h.vector.x.toFixed(1)} / Y:{h.vector.y.toFixed(1)}
+                  <td className="px-6 py-4 text-right font-mono text-xs text-slate-400">
+                     <span className="inline-block min-w-[30px]">{h.vector.x > 0 ? '散' : h.vector.x < 0 ? '收' : '平'}</span>
+                     <span className="text-slate-300 mx-1">/</span>
+                     <span className="inline-block min-w-[30px]">{h.vector.y > 0 ? '升' : h.vector.y < 0 ? '降' : '平'}</span>
                   </td>
                 </tr>
               );
             })}
           </tbody>
         </table>
+        </div>
       </div>
     );
   };
 
   return (
     <div 
-      className={`min-h-screen w-full flex flex-col relative bg-slate-50 text-slate-900 ${fontSettings.family}`}
+      className={`min-h-screen w-full flex flex-col relative bg-[#f8fafc] text-slate-900 ${fontSettings.family} selection:bg-indigo-100 selection:text-indigo-900`}
       style={{ fontSize: `${fontSettings.scale}rem` }}
     >
       {viewingHerb && (
@@ -464,16 +574,16 @@ function App() {
       />
 
       {view !== ViewMode.INPUT && (
-        <header className="fixed top-0 z-50 w-full h-16 bg-white/95 backdrop-blur-md border-b border-slate-200 flex items-center justify-between px-6 shadow-sm">
+        <header className="fixed top-0 z-50 w-full h-16 bg-white/80 backdrop-blur-xl border-b border-white shadow-sm flex items-center justify-between px-6 transition-all">
           <div className="flex items-center gap-3 cursor-pointer" onClick={() => {
               setView(ViewMode.INPUT);
               setInitialDosageRef(null);
             }}>
-             <div className="w-8 h-8 rounded-lg bg-indigo-600 text-white flex items-center justify-center font-bold shadow-md">L</div>
-             <span className="font-bold text-lg font-serif-sc text-slate-800">LogicMaster</span>
+             <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-600 to-indigo-700 text-white flex items-center justify-center font-bold shadow-lg shadow-indigo-200">L</div>
+             <span className="font-bold text-lg font-serif-sc text-slate-800 tracking-tight">LogicMaster</span>
           </div>
           
-          <nav className="hidden lg:flex bg-slate-100 rounded-full p-1">
+          <nav className="hidden lg:flex bg-slate-100/50 p-1 rounded-full border border-slate-200/50">
             {[
               { id: ViewMode.WORKSHOP, label: '计算工坊' },
               { id: ViewMode.VISUAL, label: '三焦动力学' },
@@ -487,7 +597,7 @@ function App() {
                 className={`px-5 py-1.5 rounded-full text-xs font-bold transition-all ${
                   view === tab.id 
                     ? 'bg-white text-indigo-700 shadow-sm ring-1 ring-black/5' 
-                    : 'text-slate-500 hover:text-slate-800'
+                    : 'text-slate-500 hover:text-slate-800 hover:bg-white/50'
                 }`}
               >
                 {tab.label}
@@ -498,8 +608,7 @@ function App() {
           <div className="flex items-center gap-2">
              <button 
                 onClick={() => setShowAISettingsModal(true)}
-                className="p-2 rounded-lg transition-colors bg-indigo-50 border border-transparent text-indigo-600 hover:bg-indigo-100 hover:border-indigo-200"
-                title="API 及模型设置"
+                className="p-2 rounded-lg transition-colors bg-white border border-slate-100 text-slate-400 hover:text-indigo-600 hover:border-indigo-100 shadow-sm"
              >
                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M9.53 16.122a3 3 0 00-5.78 1.128 2.25 2.25 0 01-2.4 2.245 4.5 4.5 0 008.4-2.245c0-.399-.077-.78-.22-1.128zm0 0a15.998 15.998 0 003.388-1.62m-5.043-.025a15.994 15.994 0 011.622-3.395m3.42 3.42a15.995 15.995 0 004.764-4.648l3.876-5.814a1.151 1.151 0 00-1.597-1.597L14.146 6.32a15.996 15.996 0 00-4.649 4.763m3.42 3.42a6.776 6.776 0 00-3.42-3.42" /></svg>
              </button>
@@ -507,8 +616,7 @@ function App() {
              <div className="relative">
                 <button 
                   onClick={() => setShowSettings(!showSettings)}
-                  className={`p-2 rounded-lg transition-colors border ${showSettings ? 'bg-indigo-50 border-indigo-200 text-indigo-600' : 'bg-white border-transparent text-slate-500 hover:bg-slate-100'}`}
-                  title="外观设置"
+                  className={`p-2 rounded-lg transition-colors border shadow-sm ${showSettings ? 'bg-indigo-50 border-indigo-200 text-indigo-600' : 'bg-white border-slate-100 text-slate-400 hover:text-indigo-600'}`}
                 >
                   <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M12 6.75a.75.75 0 110-1.5.75.75 0 010 1.5zM12 12.75a.75.75 0 110-1.5.75.75 0 010 1.5zM12 18.75a.75.75 0 110-1.5.75.75 0 010 1.5z" /></svg>
                 </button>
@@ -563,18 +671,18 @@ function App() {
         </header>
       )}
 
-      <main className={`flex-1 w-full z-10 ${view !== ViewMode.INPUT ? 'pt-20 pb-4 px-4 lg:px-6' : 'flex items-center justify-center p-6'}`}>
+      <main className={`flex-1 w-full z-10 ${view !== ViewMode.INPUT ? 'pt-24 pb-8 px-4 lg:px-8' : 'flex items-center justify-center p-6'}`}>
         
         {view === ViewMode.INPUT && (
           <div className="w-full max-w-3xl animate-in zoom-in-95 duration-500">
              <div className="text-center mb-12">
-                <div className="w-24 h-24 mx-auto bg-white rounded-3xl shadow-2xl shadow-indigo-100 flex items-center justify-center text-5xl mb-6 ring-1 ring-slate-100 text-indigo-600 transform hover:scale-105 transition-transform duration-500">💊</div>
+                <div className="w-24 h-24 mx-auto bg-gradient-to-br from-white to-slate-50 rounded-3xl shadow-xl shadow-indigo-100/50 flex items-center justify-center text-5xl mb-6 ring-1 ring-slate-100 text-indigo-600 transform hover:scale-105 transition-transform duration-500">💊</div>
                 <h1 className="text-5xl md:text-6xl font-black font-serif-sc text-slate-900 mb-4 tracking-tight">LogicMaster <span className="text-indigo-600">TCM</span></h1>
                 <p className="text-slate-500 text-xl font-medium">通用中医计算引擎 · 经方/时方/三焦动力学仿真</p>
              </div>
              
              <div className="bg-white p-3 rounded-[2.5rem] shadow-2xl shadow-indigo-200/40 border border-slate-100 relative overflow-hidden group">
-                <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 opacity-0 group-hover:opacity-100 transition-opacity"></div>
                 <textarea
                    value={input}
                    onChange={e => setInput(e.target.value)}
@@ -589,9 +697,6 @@ function App() {
              </div>
              
              <div className="mt-8 flex justify-center gap-6">
-                <button onClick={() => setView(ViewMode.DATABASE)} className="px-6 py-3 rounded-xl bg-white border border-slate-200 text-slate-500 font-bold hover:text-indigo-600 hover:border-indigo-200 transition-all shadow-sm text-sm flex items-center gap-2">
-                   <span>📚</span> 查阅本草纲目
-                </button>
                 <button onClick={() => setShowAISettingsModal(true)} className="px-6 py-3 rounded-xl bg-white border border-slate-200 text-slate-500 font-bold hover:text-indigo-600 hover:border-indigo-200 transition-all shadow-sm text-sm flex items-center gap-2">
                    <span>⚙️</span> 配置 API / 模型
                 </button>
@@ -602,51 +707,66 @@ function App() {
         {view === ViewMode.WORKSHOP && analysis && (
           <div className="space-y-8 animate-in slide-in-from-bottom-4 fade-in max-w-[1600px] mx-auto">
              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                <div className="bg-white p-6 rounded-2xl shadow-md border border-slate-100 flex items-center justify-between relative overflow-hidden group hover:shadow-lg transition-all">
-                   <div className={`absolute top-0 left-0 w-1.5 h-full ${getPTILabel(analysis.totalPTI).bg.replace('bg-', 'bg-')}`}></div>
+                
+                {/* Card 1: Total PTI */}
+                <div className="bg-white/80 backdrop-blur-xl p-8 rounded-[2rem] shadow-xl shadow-slate-100/50 border border-white flex flex-col justify-between group hover:-translate-y-1 transition-transform duration-300 relative overflow-hidden">
+                   <div className={`absolute top-0 right-0 w-32 h-32 rounded-full blur-3xl opacity-20 -translate-y-1/2 translate-x-1/2 ${getPTILabel(analysis.totalPTI).bg.replace('bg-', 'bg-')}`}></div>
                    <div>
-                      <div className="text-xs text-slate-400 font-bold uppercase mb-1">Total PTI Index</div>
-                      <div className={`text-5xl font-black font-mono ${getPTILabel(analysis.totalPTI).color}`}>
+                      <div className="flex items-center gap-2 mb-2">
+                         <span className={`w-2 h-2 rounded-full ${getPTILabel(analysis.totalPTI).bg.replace('bg-', 'bg-').replace('50', '500')}`}></span>
+                         <span className="text-xs text-slate-400 font-bold uppercase tracking-wider">Total PTI Index</span>
+                      </div>
+                      <div className={`text-6xl font-black font-mono tracking-tighter ${getPTILabel(analysis.totalPTI).color}`}>
                         {analysis.totalPTI > 0 ? '+' : ''}{analysis.totalPTI.toFixed(3)}
                       </div>
                    </div>
-                   <div className={`px-4 py-1.5 rounded-lg text-sm font-bold border ${getPTILabel(analysis.totalPTI).bg} ${getPTILabel(analysis.totalPTI).color} ${getPTILabel(analysis.totalPTI).border}`}>
-                     {getPTILabel(analysis.totalPTI).label}
+                   <div className="mt-4">
+                     <span className={`px-4 py-2 rounded-xl text-sm font-bold border ${getPTILabel(analysis.totalPTI).bg} ${getPTILabel(analysis.totalPTI).color} ${getPTILabel(analysis.totalPTI).border}`}>
+                       {getPTILabel(analysis.totalPTI).label}
+                     </span>
                    </div>
                 </div>
 
-                <div className="bg-white p-6 rounded-2xl shadow-md border border-slate-100 flex items-center justify-between group hover:shadow-lg transition-all">
+                {/* Card 2: Primary Driver */}
+                <div className="bg-white/80 backdrop-blur-xl p-8 rounded-[2rem] shadow-xl shadow-slate-100/50 border border-white flex flex-col justify-between group hover:-translate-y-1 transition-transform duration-300">
                    <div>
-                      <div className="text-xs text-slate-400 font-bold uppercase mb-1">Primary Driver</div>
-                      <div className="text-3xl font-bold text-slate-800 font-serif-sc">
+                      <div className="flex items-center gap-2 mb-2">
+                         <span className="w-2 h-2 rounded-full bg-slate-300"></span>
+                         <span className="text-xs text-slate-400 font-bold uppercase tracking-wider">Primary Driver</span>
+                      </div>
+                      <div className="text-4xl font-bold text-slate-800 font-serif-sc mb-1">
                         {analysis.top3[0]?.name || '-'}
                       </div>
+                      <div className="text-sm text-slate-400">
+                         Contribution Factor
+                      </div>
                    </div>
-                   <div className="text-right bg-slate-50 px-4 py-2 rounded-xl border border-slate-100">
-                      <div className={`font-mono font-black text-2xl ${analysis.top3[0]?.ptiContribution > 0 ? 'text-red-500' : 'text-blue-500'}`}>
-                        {analysis.top3[0]?.ptiContribution.toFixed(3)}
+                   <div className="self-end">
+                      <div className={`font-mono font-black text-4xl ${analysis.top3[0]?.ptiContribution > 0 ? 'text-rose-500' : 'text-blue-500'}`}>
+                        {analysis.top3[0]?.ptiContribution > 0 ? '+' : ''}{analysis.top3[0]?.ptiContribution.toFixed(2)}
                       </div>
                    </div>
                 </div>
                 
-                <div className="bg-white p-6 rounded-2xl shadow-md border border-slate-100 flex items-center justify-between group hover:shadow-lg transition-all">
+                {/* Card 3: Dosage */}
+                <div className="bg-white/80 backdrop-blur-xl p-8 rounded-[2rem] shadow-xl shadow-slate-100/50 border border-white flex flex-col justify-between group hover:-translate-y-1 transition-transform duration-300">
                    <div>
-                      <div className="text-xs text-slate-400 font-bold uppercase mb-1">总剂量 (Total Dosage)</div>
-                      <div className="text-3xl font-black font-mono text-slate-800">
-                        {analysis.herbs.reduce((sum, h) => sum + h.dosageGrams, 0).toFixed(1)}g
+                      <div className="flex items-center gap-2 mb-2">
+                         <span className="w-2 h-2 rounded-full bg-slate-300"></span>
+                         <span className="text-xs text-slate-400 font-bold uppercase tracking-wider">Total Dosage</span>
+                      </div>
+                      <div className="text-5xl font-black font-mono text-slate-800 tracking-tight">
+                        {analysis.herbs.reduce((sum, h) => sum + h.dosageGrams, 0).toFixed(1)}<span className="text-2xl ml-1 text-slate-400 font-bold">g</span>
                       </div>
                    </div>
-                   <div className="text-right">
+                   <div className="flex justify-between items-end border-t border-slate-100 pt-4 mt-4">
                      <div className="text-xs text-slate-400 font-bold">参考基准</div>
                      <div className="font-mono font-bold text-slate-500">{analysis.initialTotalDosage.toFixed(1)}g</div>
                    </div>
                 </div>
              </div>
 
-             <div>
-               <h2 className="text-xl font-bold text-slate-800 mb-4 flex items-center gap-2"><span className="w-1.5 h-6 bg-indigo-600 rounded-full"></span> 处方明细</h2>
-               {renderCalculationTable(analysis)}
-             </div>
+             {renderCalculationTable(analysis)}
           </div>
         )}
 
@@ -670,15 +790,73 @@ function App() {
 
         {view === ViewMode.REPORT && (
            <div className="max-w-[1600px] mx-auto animate-in zoom-in-95 flex flex-col gap-8">
+              {/* Report Header & Controls */}
+              {Object.keys(reports).length > 0 && (
+                  <div className="flex flex-col md:flex-row gap-4 items-center justify-between bg-white p-4 rounded-2xl shadow-sm border border-slate-100">
+                      <div className="flex items-center gap-3">
+                          <span className="font-bold text-slate-800 text-lg">分析报告</span>
+                          {reportMeta[activeReportVersion] && (
+                            <span className={`px-2 py-0.5 text-xs font-bold rounded-full border flex items-center gap-1 ${
+                                reportMeta[activeReportVersion].mode === 'quick' 
+                                ? 'bg-amber-50 text-amber-700 border-amber-200' 
+                                : 'bg-indigo-50 text-indigo-700 border-indigo-200'
+                            }`}>
+                                {reportMeta[activeReportVersion].mode === 'quick' ? '⚡ 快速审核' : '🧠 深度推演'}
+                            </span>
+                          )}
+                      </div>
+
+                      <div className="flex gap-2 items-center">
+                          {Object.keys(reports).length > 1 && (
+                            <div className="flex bg-slate-100 rounded-lg p-1 mr-4">
+                                {sortVersions(Object.keys(reports)).map(v => (
+                                    <button 
+                                        key={v}
+                                        onClick={() => setActiveReportVersion(v)}
+                                        className={`px-3 py-1 rounded-md text-xs font-bold transition-all ${activeReportVersion === v ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}
+                                    >
+                                        {v}
+                                    </button>
+                                ))}
+                            </div>
+                          )}
+
+                          {aiLoading ? (
+                                <button onClick={handleStopAI} className="text-xs font-bold text-red-600 bg-red-50 px-3 py-2 rounded-lg border border-red-100 hover:bg-red-100 flex items-center gap-1 animate-pulse">
+                                    🛑 停止
+                                </button>
+                            ) : (
+                                <>
+                                    <button 
+                                        onClick={handleResetCurrentVersion} 
+                                        className="text-xs font-bold text-indigo-600 bg-indigo-50 px-3 py-2 rounded-lg border border-indigo-100 hover:bg-indigo-100 flex items-center gap-1"
+                                    >
+                                        <span>↺</span> 重置并重新生成
+                                    </button>
+                                    <button 
+                                        onClick={handleCopyHtml} 
+                                        className="text-xs font-bold text-slate-600 bg-white px-3 py-2 rounded-lg border border-slate-200 hover:bg-slate-50"
+                                    >
+                                        复制代码
+                                    </button>
+                                    <button 
+                                        onClick={handleDeleteReportVersion} 
+                                        className="text-xs font-bold text-red-600 bg-red-50 px-3 py-2 rounded-lg border border-red-100 hover:bg-red-100"
+                                    >
+                                        删除
+                                    </button>
+                                </>
+                            )}
+                      </div>
+                  </div>
+              )}
+
+              {/* Main Content Area */}
               {aiLoading && (!reports[activeReportVersion] || reports[activeReportVersion] === '') ? (
-                <div className="text-center py-32 bg-white rounded-3xl border border-slate-100">
+                <div className="text-center py-32 bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-white shadow-xl">
                    <div className="w-16 h-16 border-4 border-indigo-100 border-t-indigo-600 rounded-full animate-spin mx-auto mb-6"></div>
-                   <h2 className="text-xl font-bold text-slate-800">AI 正在进行深度战略审计...</h2>
-                   <p className="text-slate-400 mt-2">正在进行处方逆向工程、风险矩阵构建与三焦动态校准</p>
-                   <p className="text-slate-300 text-xs mt-4">正在调用大语言模型进行长文本推演，可能需要20-60秒，请耐心等待...</p>
-                   <button onClick={handleStopAI} className="mt-8 px-6 py-2 bg-red-50 text-red-600 rounded-lg border border-red-200 hover:bg-red-100 font-bold transition-all">
-                       🛑 停止生成
-                   </button>
+                   <h2 className="text-xl font-bold text-slate-800">AI 正在生成策略...</h2>
+                   <p className="text-slate-400 mt-2">正在进行数据推演，请耐心等待</p>
                 </div>
               ) : aiError ? (
                 <div className="text-center py-32 bg-white rounded-3xl border border-red-100">
@@ -687,7 +865,7 @@ function App() {
                    <p className="text-red-500 mt-2 font-mono text-sm max-w-lg mx-auto bg-red-50 p-4 rounded-lg border border-red-100">{aiError}</p>
                    <div className="flex justify-center gap-4 mt-8">
                       <button 
-                          onClick={() => handleAskAI()} 
+                          onClick={() => handleAskAI('deep')} 
                           className="px-6 py-2 bg-indigo-600 text-white rounded-xl shadow-lg hover:bg-indigo-700 transition-colors font-bold"
                       >
                           重试
@@ -700,46 +878,12 @@ function App() {
                       </button>
                    </div>
                 </div>
-              ) : Object.keys(reports).length > 0 ? (
+              ) : reports[activeReportVersion] ? (
                  <div className="flex flex-col gap-6">
-                    {Object.keys(reports).length > 1 && (
-                       <div className="flex justify-center gap-2 mb-4">
-                          {sortVersions(Object.keys(reports)).map(v => (
-                             <button 
-                                key={v}
-                                onClick={() => setActiveReportVersion(v)}
-                                className={`px-3 py-1 rounded-full text-xs font-bold transition-all ${activeReportVersion === v ? 'bg-indigo-600 text-white' : 'bg-white text-slate-500 border border-slate-200 hover:border-indigo-300'}`}
-                             >
-                               {v}
-                             </button>
-                          ))}
-                       </div>
-                    )}
-                    
-                    <div className="flex justify-end gap-3 flex-wrap">
-                        {aiLoading && (
-                            <button onClick={handleStopAI} className="text-xs font-bold text-red-600 bg-red-50 px-3 py-1.5 rounded-lg border border-red-100 hover:bg-red-100 flex items-center gap-1 animate-pulse">
-                                🛑 停止
-                            </button>
-                        )}
-                        <button 
-                            onClick={() => handleAskAI("请重新生成一份更详细的报告")} 
-                            className="text-xs font-bold text-indigo-600 bg-indigo-50 px-3 py-1.5 rounded-lg border border-indigo-100 hover:bg-indigo-100 flex items-center gap-1"
-                            disabled={aiLoading}
-                        >
-                           <span>✨</span> 重新生成
-                        </button>
-                        <button onClick={handleCopyHtml} className="text-xs font-bold text-slate-600 bg-white px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50">
-                           复制代码
-                        </button>
-                        <button onClick={handleDeleteReportVersion} className="text-xs font-bold text-red-600 bg-red-50 px-3 py-1.5 rounded-lg border border-red-100 hover:bg-red-100" disabled={aiLoading}>
-                           删除此版本
-                        </button>
-                    </div>
-
                     <div 
-                      className="prose prose-slate max-w-none bg-white p-8 md:p-12 rounded-[2rem] shadow-xl border border-slate-200"
-                      dangerouslySetInnerHTML={{ __html: reports[activeReportVersion] || '' }}
+                      className="prose prose-slate max-w-none bg-white p-8 md:p-12 rounded-[2.5rem] shadow-xl border border-slate-100"
+                      dangerouslySetInnerHTML={{ __html: processReportContent(reports[activeReportVersion]) }}
+                      onClick={handleReportClick}
                     />
 
                     {isReportIncomplete && (
@@ -768,23 +912,49 @@ function App() {
                     )}
                  </div>
               ) : (
-                 <div className="text-center py-20 bg-white rounded-3xl border border-slate-100 text-slate-400">
+                 <div className="text-center py-24 bg-white/80 backdrop-blur-xl rounded-[2.5rem] border border-white shadow-xl text-slate-400">
                     {analysis ? (
-                        <>
-                            <p>已完成处方计算，点击下方按钮生成深度分析报告。</p>
-                            <button 
-                                onClick={() => handleAskAI()} 
-                                className="mt-6 px-6 py-3 bg-indigo-600 text-white rounded-xl shadow-lg hover:bg-indigo-700 transition-colors font-bold flex items-center gap-2 mx-auto"
-                            >
-                                <span>✨</span> 生成 AI 深度报告
-                            </button>
+                        <div className="max-w-md mx-auto">
+                            <h3 className="text-2xl font-black text-slate-800 font-serif-sc mb-4">选择报告类型</h3>
+                            <p className="mb-8 text-slate-500">已完成处方计算，请选择一种模式生成 AI 深度分析。</p>
+                            
+                            <div className="flex flex-col gap-4">
+                                <button 
+                                    onClick={() => handleAskAI('deep')} 
+                                    className="w-full p-4 bg-indigo-600 text-white rounded-2xl shadow-lg hover:bg-indigo-700 hover:-translate-y-0.5 transition-all flex items-center justify-between group"
+                                >
+                                    <div className="flex items-center gap-4">
+                                        <span className="text-2xl">🧠</span>
+                                        <div className="text-left">
+                                            <div className="font-bold">生成深度推演报告</div>
+                                            <div className="text-xs text-indigo-200 font-normal opacity-80">完整 6 步推演 / 局势博弈论 / 耗时较长</div>
+                                        </div>
+                                    </div>
+                                    <span className="opacity-0 group-hover:opacity-100 transition-opacity">→</span>
+                                </button>
+
+                                <button 
+                                    onClick={() => handleAskAI('quick')} 
+                                    className="w-full p-4 bg-white border-2 border-slate-100 text-slate-700 rounded-2xl hover:border-amber-200 hover:text-amber-800 hover:bg-amber-50 transition-all flex items-center justify-between group"
+                                >
+                                    <div className="flex items-center gap-4">
+                                        <span className="text-2xl">⚡</span>
+                                        <div className="text-left">
+                                            <div className="font-bold">生成快速审核报告</div>
+                                            <div className="text-xs text-slate-400 font-normal group-hover:text-amber-700/70">找漏洞 / 提建议 / 拓思路 / 临床辅助</div>
+                                        </div>
+                                    </div>
+                                    <span className="opacity-0 group-hover:opacity-100 transition-opacity">→</span>
+                                </button>
+                            </div>
+                            
                             <button 
                                 onClick={() => setView(ViewMode.INPUT)} 
-                                className="mt-4 text-sm text-slate-400 hover:text-indigo-600 underline block mx-auto"
+                                className="mt-8 text-sm text-slate-400 hover:text-slate-600 underline block mx-auto"
                             >
                                 放弃当前结果，开始新演算
                             </button>
-                        </>
+                        </div>
                     ) : (
                         <>
                             <p>暂无报告。请点击“开始演算”后生成。</p>
@@ -801,18 +971,19 @@ function App() {
            </div>
         )}
 
-        {view === ViewMode.AI_CHAT && analysis && (
-          <div className="h-[80vh] max-w-[1600px] mx-auto animate-in zoom-in-95">
-             <AIChatbot 
-                analysis={analysis} 
-                prescriptionInput={input} 
-                reportContent={reports[activeReportVersion]} 
-                onUpdatePrescription={handleUpdatePrescriptionFromChat}
-                onRegenerateReport={(instr) => handleAskAI(instr)}
-                settings={aiSettings}
-             />
-          </div>
-        )}
+        <div className={`h-[calc(100vh-8rem)] max-w-[1600px] mx-auto animate-in zoom-in-95 flex flex-col ${view === ViewMode.AI_CHAT && analysis ? '' : 'hidden'}`}>
+             {analysis && (
+                 <AIChatbot 
+                    analysis={analysis} 
+                    prescriptionInput={input} 
+                    reportContent={reports[activeReportVersion]} 
+                    onUpdatePrescription={handleUpdatePrescriptionFromChat}
+                    onRegenerateReport={(instr) => handleAskAI('regenerate', instr)}
+                    onHerbClick={handleHerbClick}
+                    settings={aiSettings}
+                 />
+             )}
+        </div>
         
         {view === ViewMode.AI_CHAT && !analysis && (
             <div className="text-center py-20 bg-white rounded-3xl border border-slate-100 text-slate-400 max-w-3xl mx-auto mt-20">

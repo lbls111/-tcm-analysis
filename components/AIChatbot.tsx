@@ -1,20 +1,23 @@
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { generateChatStream, OpenAIMessage } from '../services/openaiService';
+import { generateChatStream, OpenAIMessage, OpenAIToolCall } from '../services/openaiService';
 import { AnalysisResult, AISettings } from '../types';
+import { searchHerbsForAI, FULL_HERB_LIST } from '../data/herbDatabase';
 import ReactMarkdown from 'react-markdown';
-import { FULL_HERB_LIST } from '../data/herbDatabase';
+import remarkGfm from 'remark-gfm';
+import rehypeRaw from 'rehype-raw';
 
 // ==========================================
 // 1. Types
 // ==========================================
 interface Message {
-  role: 'user' | 'model' | 'function';
+  role: 'user' | 'model' | 'tool';
   text: string;
-  isFunctionCall?: boolean;
-  functionCalls?: any[]; 
   isError?: boolean;
-  originalHistory?: Message[];
+  // For Tool/Function logic
+  toolCalls?: OpenAIToolCall[]; // When role='model', it might request tools
+  toolCallId?: string; // When role='tool', this links back to the request
+  functionName?: string; // Display name for the tool
 }
 
 interface Session {
@@ -30,13 +33,241 @@ interface Props {
   reportContent?: string;
   onUpdatePrescription?: (newPrescription: string) => void;
   onRegenerateReport?: (instructions: string) => void;
+  onHerbClick?: (herbName: string) => void;
   settings: AISettings;
 }
 
 const LS_CHAT_SESSIONS_KEY = "logicmaster_chat_sessions";
 
 // ==========================================
-// 2. Main Component
+// 2. Helpers (Auto Linking)
+// ==========================================
+
+function escapeRegExp(string: string) {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// ==========================================
+// 3. Sub-Components (Message Item)
+// ==========================================
+
+interface MessageItemProps {
+  message: Message;
+  index: number;
+  isLoading: boolean;
+  isLast: boolean;
+  onDelete: (index: number) => void;
+  onRegenerate: (index: number) => void;
+  onEdit: (index: number, newText: string, resend: boolean) => void;
+  onContinue: () => void;
+  onHerbClick?: (herbName: string) => void;
+  herbRegex: RegExp;
+}
+
+const HerbPill: React.FC<{name: string, onClick: (name: string) => void}> = ({ name, onClick }) => (
+    <span 
+      onClick={(e) => {
+          e.preventDefault();
+          onClick(name);
+      }}
+      className="inline-flex items-center gap-1 mx-1 px-1.5 py-0.5 rounded text-xs font-bold bg-indigo-50 text-indigo-700 border border-indigo-200 cursor-pointer hover:bg-indigo-100 hover:border-indigo-300 hover:text-indigo-900 transition-all transform hover:-translate-y-0.5 align-middle shadow-sm select-none"
+      title={`点击查看【${name}】详情`}
+    >
+        <span className="text-[10px] opacity-60">💊</span>
+        {name}
+    </span>
+);
+
+const ChatMessageItem: React.FC<MessageItemProps> = ({ 
+  message, 
+  index, 
+  isLoading, 
+  isLast,
+  onDelete, 
+  onRegenerate, 
+  onEdit,
+  onContinue,
+  onHerbClick,
+  herbRegex
+}) => {
+  const [isEditing, setIsEditing] = useState(false);
+  const [editValue, setEditValue] = useState(message.text);
+  const [copyStatus, setCopyStatus] = useState<'idle' | 'copied'>('idle');
+
+  // Reset edit state when message changes externally
+  useEffect(() => {
+    setEditValue(message.text);
+  }, [message.text]);
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(message.text).then(() => {
+      setCopyStatus('copied');
+      setTimeout(() => setCopyStatus('idle'), 2000);
+    });
+  };
+
+  const handleSaveEdit = () => {
+    if (editValue.trim() !== message.text) {
+      const shouldResend = message.role === 'user';
+      onEdit(index, editValue, shouldResend);
+    }
+    setIsEditing(false);
+  };
+
+  const renderTextWithAutoLinks = (text: string) => {
+      if (!text) return null;
+
+      // 1. Split text by protected segments (HTML tags or Markdown links)
+      // This regex matches <...> OR [ ... ](...) OR ![ ... ](...)
+      const protectedRegex = /(<[^>]+>|\[.*?\]\(.*?\)|!\[.*?\]\(.*?\))/g;
+      const parts = text.split(protectedRegex);
+
+      // 2. Process plain text segments with herbRegex
+      const processedText = parts.map(part => {
+          if (part.match(protectedRegex)) return part;
+          // Replace herbs with a specific span marker that we can intercept in the ReactMarkdown components
+          return part.replace(herbRegex, (match) => `<span data-herb="${match}">${match}</span>`);
+      }).join('');
+      
+      return (
+        <ReactMarkdown 
+            remarkPlugins={[remarkGfm]}
+            rehypePlugins={[rehypeRaw]}
+            components={{
+                span: ({node, className, children, ...props}) => {
+                    // Check if this span was injected by us
+                    const herbName = props['data-herb'] as string;
+                    if (herbName) {
+                        return <HerbPill name={herbName} onClick={onHerbClick || (() => {})} />;
+                    }
+                    return <span className={className} {...props}>{children}</span>;
+                },
+                a: ({node, href, children, ...props}) => {
+                    // Backup for any legacy herb:// links
+                    if (href && href.startsWith('herb://')) {
+                        const name = decodeURIComponent(href.replace('herb://', ''));
+                        return <HerbPill name={name} onClick={onHerbClick || (() => {})} />;
+                    }
+                    return <a href={href} target="_blank" rel="noopener noreferrer" className="text-blue-600 underline decoration-blue-300 hover:text-blue-800" {...props}>{children}</a>;
+                },
+                table: ({node, ...props}) => <div className="overflow-x-auto my-4 rounded-lg border border-slate-200 shadow-sm"><table className="border-collapse table-auto w-full text-sm" {...props} /></div>,
+                thead: ({node, ...props}) => <thead className="bg-slate-50 border-b border-slate-200 text-slate-600" {...props} />,
+                th: ({node, ...props}) => <th className="px-4 py-3 text-left font-bold whitespace-nowrap" {...props} />,
+                td: ({node, ...props}) => <td className="border-t border-slate-100 px-4 py-2" {...props} />,
+                img: ({node, ...props}) => <img className="max-w-full rounded-lg shadow-sm" {...props} alt="" />,
+                p: ({node, ...props}) => <p className="mb-2 last:mb-0 leading-relaxed" {...props} />,
+                ul: ({node, ...props}) => <ul className="list-disc pl-5 mb-4 space-y-1" {...props} />,
+                ol: ({node, ...props}) => <ol className="list-decimal pl-5 mb-4 space-y-1" {...props} />,
+            }}
+        >
+            {processedText}
+        </ReactMarkdown>
+      );
+  };
+
+  // Hide Tool Messages entirely from the main flow
+  if (message.role === 'tool') {
+      return null;
+  }
+  
+  // Hide AI messages that ONLY contain tool calls
+  if (message.role === 'model' && !message.text && message.toolCalls && message.toolCalls.length > 0) {
+      return null;
+  }
+
+  return (
+    <div className={`flex items-start gap-4 ${message.role === 'user' ? 'flex-row-reverse' : 'flex-row'} group mb-6 animate-in fade-in slide-in-from-bottom-2`}>
+      {/* Avatar */}
+      <div className={`w-10 h-10 rounded-full flex-shrink-0 flex items-center justify-center text-sm font-bold shadow-sm border border-white/50 ${message.role === 'user' ? 'bg-indigo-600 text-white' : 'bg-white text-indigo-600 border-indigo-100'}`}>
+        {message.role === 'user' ? '您' : 'AI'}
+      </div>
+
+      {/* Content Bubble */}
+      <div className={`flex flex-col ${message.role === 'user' ? 'items-end' : 'items-start'} max-w-[95%] lg:max-w-[85%]`}>
+        
+        {isEditing ? (
+          <div className="w-full min-w-[300px] bg-white border-2 border-indigo-400 rounded-2xl p-4 shadow-xl z-10">
+            <textarea 
+              value={editValue}
+              onChange={(e) => setEditValue(e.target.value)}
+              className="w-full h-32 p-2 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-100 resize-none font-mono"
+            />
+            <div className="flex justify-end gap-2 mt-3">
+              <button 
+                onClick={() => setIsEditing(false)} 
+                className="px-3 py-1.5 text-xs text-slate-500 hover:bg-slate-100 rounded-md font-bold transition-colors"
+              >
+                取消
+              </button>
+              <button 
+                onClick={handleSaveEdit} 
+                className="px-3 py-1.5 text-xs bg-indigo-600 text-white rounded-md hover:bg-indigo-700 shadow-md transition-colors font-bold"
+              >
+                {message.role === 'user' ? '保存并重新发送' : '保存修改'}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className={`relative px-6 py-5 rounded-2xl text-base leading-7 shadow-sm border overflow-x-auto ${
+            message.role === 'user' 
+              ? 'bg-indigo-600 text-white border-indigo-500 rounded-tr-none' 
+              : 'bg-white text-slate-800 border-slate-200 rounded-tl-none'
+          }`}>
+             {message.isError ? (
+               <div className="flex items-center gap-2 text-red-400">
+                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5"><path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-8-5a.75.75 0 01.75.75v4.5a.75.75 0 01-1.5 0v-4.5A.75.75 0 0110 5zm0 10a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" /></svg>
+                 <span>{message.text}</span>
+               </div>
+             ) : (
+                renderTextWithAutoLinks(message.text || '')
+             )}
+             
+             {/* Continue Button for truncated AI responses */}
+             {message.role === 'model' && isLast && !isLoading && (
+                 <button 
+                    onClick={onContinue}
+                    className="mt-4 text-xs bg-indigo-50 text-indigo-700 px-4 py-2 rounded-full border border-indigo-200 hover:bg-indigo-100 font-bold flex items-center gap-2 transition-all"
+                    title="如果回答未显示完整，点击继续"
+                 >
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-3 h-3"><path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" /></svg>
+                    继续生成
+                 </button>
+             )}
+          </div>
+        )}
+
+        {/* Action Toolbar */}
+        {!isEditing && !isLoading && (
+          <div className={`flex items-center gap-1 mt-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200 ${message.role === 'user' ? 'justify-end pr-1' : 'justify-start pl-1'}`}>
+             <ActionButton icon="📋" label={copyStatus === 'copied' ? '已复制' : '复制'} onClick={handleCopy} />
+             <ActionButton icon="✎" label="编辑" onClick={() => setIsEditing(true)} />
+             <ActionButton icon="↻" label={message.role === 'user' ? '重新发送' : '删除并重新生成'} onClick={() => onRegenerate(index)} />
+             <ActionButton icon="🗑️" label="删除" onClick={() => onDelete(index)} isDestructive />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+const ActionButton: React.FC<{ icon: string, label: string, onClick: () => void, isDestructive?: boolean }> = ({ icon, label, onClick, isDestructive }) => (
+  <button 
+    onClick={onClick}
+    className={`flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-bold border transition-all ${
+      isDestructive 
+        ? 'text-slate-400 hover:text-red-600 hover:bg-red-50 border-transparent hover:border-red-100' 
+        : 'text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 border-transparent hover:border-indigo-100'
+    }`}
+    title={label}
+  >
+    <span>{icon}</span>
+    <span className="hidden sm:inline">{label}</span>
+  </button>
+);
+
+
+// ==========================================
+// 3. Main Component
 // ==========================================
 export const AIChatbot: React.FC<Props> = ({ 
   analysis, 
@@ -44,54 +275,73 @@ export const AIChatbot: React.FC<Props> = ({
   reportContent, 
   onUpdatePrescription,
   onRegenerateReport,
+  onHerbClick,
   settings
 }) => {
   const [sessions, setSessions] = useState<Record<string, Session>>({});
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [editingMessageIndex, setEditingMessageIndex] = useState<number | null>(null);
-  const [editInput, setEditInput] = useState('');
+  const [isToolExecuting, setIsToolExecuting] = useState(false);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
 
-  // --- Derived State ---
-  const activeMessages = useMemo(() => {
-    return activeSessionId ? sessions[activeSessionId]?.messages || [] : [];
-  }, [sessions, activeSessionId]);
+  // === Performance Optimization ===
+  // 1. Sort herb names by length desc (to match longest first)
+  const sortedHerbNames = useMemo(() => {
+     return FULL_HERB_LIST.map(h => h.name).sort((a, b) => b.length - a.length);
+  }, [FULL_HERB_LIST.length]); 
 
-  const sortedSessions = useMemo(() => {
-    return Object.values(sessions).sort((a, b) => b.createdAt - a.createdAt);
-  }, [sessions]);
-  
-  // --- Effects for Data Persistence & UI ---
+  // 2. Create a single RegEx for all herbs (O(1) compilation, O(N) scan)
+  const herbRegex = useMemo(() => {
+      if (sortedHerbNames.length === 0) return /(?!)/; // Match nothing
+      // Escape all names
+      const escaped = sortedHerbNames.map(escapeRegExp);
+      // Use boundary checks or just simple inclusion? Simple inclusion is safer for Chinese.
+      // Use standard OR grouping.
+      return new RegExp(`(${escaped.join('|')})`, 'g');
+  }, [sortedHerbNames]);
+
+  // --- Data Loading & Persistence ---
   useEffect(() => {
     try {
       const saved = localStorage.getItem(LS_CHAT_SESSIONS_KEY);
       if (saved) {
-        const parsed: any = JSON.parse(saved);
-
-        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-          const sessionsData = parsed as Record<string, Session>;
-          if (Object.keys(sessionsData).length > 0) {
-            setSessions(sessionsData);
-            const lastActiveId = localStorage.getItem('logicmaster_last_active_session');
-            if (lastActiveId && sessionsData[lastActiveId]) {
-              setActiveSessionId(lastActiveId);
-            } else {
-              const sortedIds = Object.keys(sessionsData).sort((a, b) => sessionsData[b].createdAt - sessionsData[a].createdAt);
-              setActiveSessionId(sortedIds[0]);
-            }
-            return;
+        const parsed = JSON.parse(saved);
+        if (parsed && typeof parsed === 'object') {
+          setSessions(parsed);
+          const lastActive = localStorage.getItem('logicmaster_last_active_session');
+          if (lastActive && parsed[lastActive]) {
+            setActiveSessionId(lastActive);
+          } else {
+            const ids = Object.keys(parsed).sort((a, b) => parsed[b].createdAt - parsed[a].createdAt);
+            if (ids.length > 0) setActiveSessionId(ids[0]);
           }
         }
       }
     } catch (e) {
-      console.error("Failed to load chat history", e);
+      console.error("Failed to load sessions", e);
     }
-    createNewSession();
+    
+    // Defer creation to ensure we check state first
+    setTimeout(() => {
+        setSessions(current => {
+            if (Object.keys(current).length === 0) {
+                 const newId = `session_${Date.now()}`;
+                 const newSession: Session = {
+                    id: newId,
+                    title: "新的研讨",
+                    createdAt: Date.now(),
+                    messages: [{ role: 'model', text: '我是您的 AI 中医助手。我可以帮您分析处方，或查阅药典数据。请问您想了解什么？' }],
+                 };
+                 setActiveSessionId(newId);
+                 return { [newId]: newSession };
+            }
+            return current;
+        });
+    }, 0);
   }, []);
 
   useEffect(() => {
@@ -105,412 +355,460 @@ export const AIChatbot: React.FC<Props> = ({
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [activeMessages]);
-  
+  }, [sessions, activeSessionId, isLoading, isToolExecuting]);
+
   useEffect(() => {
     if (textareaRef.current) {
         textareaRef.current.style.height = 'auto';
-        textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 192)}px`;
+        textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 150)}px`;
     }
   }, [input]);
 
-  // --- Session Management ---
+  // --- Session Logic ---
   const createNewSession = () => {
     const newId = `session_${Date.now()}`;
     const newSession: Session = {
       id: newId,
       title: "新的研讨",
       createdAt: Date.now(),
-      messages: [{ role: 'model', text: '我是 AI 问答助手。您可以向我提问，或要求修改处方、重构报告。' }],
+      messages: [{ role: 'model', text: '我是您的 AI 中医助手。我可以帮您分析处方，或查阅药典数据。请问您想了解什么？' }],
     };
     setSessions(prev => ({ ...prev, [newId]: newSession }));
     setActiveSessionId(newId);
     return newId;
   };
 
-  const handleDeleteSession = (sessionId: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (!window.confirm("确定要删除这个会话吗？")) return;
-
+  const deleteSession = (id: string, e?: React.MouseEvent) => {
+    // Critical: Stop propagation to prevent selecting the session we are deleting
+    if (e) {
+        e.stopPropagation();
+        e.nativeEvent.stopImmediatePropagation();
+        e.preventDefault();
+    }
+    
+    if (!window.confirm("确认删除此会话记录吗？")) return;
+    
     setSessions(prev => {
-      const newSessions = { ...prev };
-      delete newSessions[sessionId];
-
-      if (activeSessionId === sessionId) {
-        const remainingSessions = Object.values(newSessions).sort((a, b) => b.createdAt - a.createdAt);
-        if (remainingSessions.length > 0) {
-          setActiveSessionId(remainingSessions[0].id);
-        } else {
-          const newId = `session_${Date.now()}`;
-          const newSession: Session = {
-            id: newId,
-            title: "新的研讨",
-            createdAt: Date.now(),
-            messages: [{ role: 'model', text: '我是 AI 问答助手。您可以向我提问，或要求修改处方、重构报告。' }],
-          };
-          newSessions[newId] = newSession;
-          setActiveSessionId(newId);
-        }
+      const next = { ...prev };
+      delete next[id];
+      
+      // If we are deleting the currently active session
+      if (activeSessionId === id) {
+          const remainingIds = Object.keys(next).sort((a, b) => next[b].createdAt - next[a].createdAt);
+          if (remainingIds.length > 0) {
+              setActiveSessionId(remainingIds[0]); // Switch to next available
+          } else {
+              // If no sessions left, create a fresh one immediately
+              const newId = `session_${Date.now()}`;
+              next[newId] = {
+                  id: newId,
+                  title: "新的研讨",
+                  createdAt: Date.now(),
+                  messages: [{ role: 'model', text: '我是您的 AI 中医助手。我可以帮您分析处方，或查阅药典数据。请问您想了解什么？' }],
+              };
+              setActiveSessionId(newId);
+          }
       }
-      return newSessions;
+      return next;
     });
   };
-  
-  // --- Message Actions ---
+
+  const activeMessages = useMemo(() => {
+    return activeSessionId ? sessions[activeSessionId]?.messages || [] : [];
+  }, [sessions, activeSessionId]);
+
+  // --- Message Action Handlers ---
+
   const handleStop = () => {
-      if (abortControllerRef.current) {
-          abortControllerRef.current.abort();
-          abortControllerRef.current = null;
-          setIsLoading(false);
-      }
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+      setIsLoading(false);
+      setIsToolExecuting(false);
+    }
   };
 
   const handleDeleteMessage = (index: number) => {
     if (!activeSessionId) return;
     setSessions(prev => {
-        const newSessions = { ...prev };
-        const session = { ...newSessions[activeSessionId] };
-        session.messages = session.messages.filter((_, i) => i !== index);
-        newSessions[activeSessionId] = session;
-        return newSessions;
+      const sess = { ...prev[activeSessionId] };
+      sess.messages = sess.messages.filter((_, i) => i !== index);
+      return { ...prev, [activeSessionId]: sess };
     });
   };
 
-  const handleStartEdit = (index: number, text: string) => {
-      setEditingMessageIndex(index);
-      setEditInput(text);
-  };
+  const handleEditMessage = (index: number, newText: string, shouldResend: boolean) => {
+    if (!activeSessionId) return;
+    setSessions(prev => {
+       const sess = { ...prev[activeSessionId] };
+       const newMsgs = [...sess.messages];
+       newMsgs[index] = { ...newMsgs[index], text: newText };
+       sess.messages = newMsgs;
+       return { ...prev, [activeSessionId]: sess };
+    });
 
-  const handleSaveEdit = async (index: number) => {
-      if (!activeSessionId || !editInput.trim()) return;
-      
-      // Update the user message, remove all subsequent messages, and regenerate
-      const session = sessions[activeSessionId];
-      const newHistory = session.messages.slice(0, index + 1); // Keep up to the edited message
-      newHistory[index].text = editInput; // Update text
-
-      setSessions(prev => ({
-          ...prev,
-          [activeSessionId]: {
-              ...prev[activeSessionId],
-              messages: newHistory
-          }
-      }));
-      setEditingMessageIndex(null);
-      
-      setIsLoading(true);
-      try {
-          // Regenerate based on the new history (excluding the now last message which is the user input to be sent)
-          await runGeneration(activeSessionId, newHistory); 
-      } catch (error) {
-          console.error("Regeneration failed", error);
-      } finally {
-          setIsLoading(false);
-      }
+    if (shouldResend) {
+       handleRegenerate(index);
+    }
   };
 
   const handleRegenerate = async (index: number) => {
-      if (!activeSessionId) return;
-      const session = sessions[activeSessionId];
-      // Keep messages UP TO the one *before* this AI message
-      // Assuming 'index' is the AI message we want to regenerate.
-      const newHistory = session.messages.slice(0, index);
-      
-      setSessions(prev => ({
-          ...prev,
-          [activeSessionId]: {
-              ...prev[activeSessionId],
-              messages: newHistory
-          }
-      }));
+     if (!activeSessionId || isLoading) return;
+     const currentMessages = sessions[activeSessionId].messages;
+     const targetMsg = currentMessages[index];
+     
+     let newHistory: Message[] = [];
+     if (targetMsg.role === 'user') {
+         newHistory = currentMessages.slice(0, index + 1);
+     } else {
+         newHistory = currentMessages.slice(0, index);
+     }
 
-      setIsLoading(true);
-      try {
-          await runGeneration(activeSessionId, newHistory);
-      } catch (error) {
-          console.error("Regeneration failed", error);
-      } finally {
-          setIsLoading(false);
-      }
+     setSessions(prev => ({
+         ...prev,
+         [activeSessionId]: { ...prev[activeSessionId], messages: newHistory }
+     }));
+
+     await runGeneration(activeSessionId, newHistory);
   };
 
-  const handleContinue = async () => {
-      if (!activeSessionId) return;
-      const userMsg: Message = { role: 'user', text: "请继续 (Please continue)" };
-      
-      setSessions(prev => {
-        const newSessions = { ...prev };
-        const session = { ...newSessions[activeSessionId] };
-        session.messages = [...session.messages, userMsg];
-        newSessions[activeSessionId] = session;
-        return newSessions;
-      });
-      
-      setIsLoading(true);
-      try {
-        await runGeneration(activeSessionId, [...sessions[activeSessionId].messages, userMsg]);
-      } catch (e) {
-          console.error(e);
-      } finally {
-          setIsLoading(false);
-      }
-  };
-
-  // --- Core Logic ---
   const handleSend = async () => {
     if (!input.trim() || isLoading) return;
+    let targetSessionId = activeSessionId;
+    if (!targetSessionId) targetSessionId = createNewSession();
 
     const userMsg: Message = { role: 'user', text: input };
     const currentInput = input;
     setInput('');
-    
-    let targetSessionId = activeSessionId;
-    const isNewConversation = activeSessionId ? sessions[activeSessionId]?.messages.length <= 1 : true;
-    
-    if (!targetSessionId) {
-      targetSessionId = createNewSession();
-    }
-    
-    setSessions(prev => {
-      const newSessions = { ...prev };
-      const session = { ...newSessions[targetSessionId!] };
-      session.messages = [...session.messages, userMsg];
-      if (isNewConversation) {
-        session.title = currentInput.substring(0, 40) + (currentInput.length > 40 ? '...' : '');
-      }
-      newSessions[targetSessionId!] = session;
-      return newSessions;
-    });
-    
-    setIsLoading(true);
 
-    try {
-      await runGeneration(targetSessionId, [...sessions[targetSessionId!].messages, userMsg]);
-    } catch (error: any) {
-      if (error.name === 'AbortError') {
-          console.log('Chat aborted');
-          return;
-      }
-      console.error("Chat generation failed:", error);
-      const errorMsg: Message = {
-        role: 'model',
-        text: `❌ 请求失败: ${error.message}`,
-        isError: true,
-        originalHistory: sessions[targetSessionId!].messages
-      };
-      setSessions(prev => {
-        const newSessions = { ...prev };
-        const session = { ...newSessions[targetSessionId!] };
-        session.messages = [...session.messages, errorMsg];
-        newSessions[targetSessionId!] = session;
-        return newSessions;
-      });
-    } finally {
-      setIsLoading(false);
-    }
+    setSessions(prev => {
+        const sess = { ...prev[targetSessionId!] };
+        sess.messages = [...sess.messages, userMsg];
+        if (sess.messages.length <= 2) {
+            sess.title = currentInput.slice(0, 20) + (currentInput.length > 20 ? '...' : '');
+        }
+        return { ...prev, [targetSessionId!]: sess };
+    });
+
+    const currentHistory = [...sessions[targetSessionId!].messages, userMsg];
+    await runGeneration(targetSessionId!, currentHistory);
   };
 
+  const handleContinue = async () => {
+     if (!activeSessionId || isLoading) return;
+     const userMsg: Message = { role: 'user', text: "请继续 (Please continue output)" };
+     setSessions(prev => {
+        const sess = { ...prev[activeSessionId] };
+        sess.messages = [...sess.messages, userMsg];
+        return { ...prev, [activeSessionId]: sess };
+     });
+     const currentHistory = [...sessions[activeSessionId].messages, userMsg];
+     await runGeneration(activeSessionId, currentHistory);
+  };
+
+  // --- Core Generation Logic (Recursive for Tools) ---
   const runGeneration = async (sessionId: string, history: Message[]) => {
-    const apiHistory: OpenAIMessage[] = history
-      .filter(m => !m.isError)
-      .map(m => ({
-        role: m.role === 'model' ? 'assistant' : m.role,
-        content: m.text,
-      } as OpenAIMessage));
+      setIsLoading(true);
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
 
-    // Abort controller
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
-
-    const stream = generateChatStream(apiHistory, analysis, prescriptionInput, reportContent, settings, controller.signal);
-    
-    let modelResponseText = '';
-    
-    // Optimistic update: Add empty AI message
-    setSessions(prev => {
-        const newSessions = { ...prev };
-        const session = { ...newSessions[sessionId] };
-        session.messages = [...session.messages, { role: 'model', text: '' }];
-        newSessions[sessionId] = session;
-        return newSessions;
-    });
-
-    for await (const chunk of stream) {
-      if (chunk.text) {
-        modelResponseText += chunk.text;
-        setSessions(prev => {
-          const newSessions = { ...prev };
-          const session = { ...newSessions[sessionId] };
-          const lastMessage = session.messages[session.messages.length - 1];
-          if (lastMessage) {
-            lastMessage.text = modelResponseText;
+      // Map local messages to OpenAI API format
+      const apiHistory: OpenAIMessage[] = history.map(m => {
+          if (m.role === 'model') {
+              return {
+                  role: 'assistant',
+                  content: m.text || null,
+                  tool_calls: m.toolCalls
+              };
+          } else if (m.role === 'tool') {
+              return {
+                  role: 'tool',
+                  tool_call_id: m.toolCallId,
+                  content: m.text
+              };
+          } else {
+              return {
+                  role: m.role,
+                  content: m.text
+              };
           }
-          newSessions[sessionId] = session;
-          return newSessions;
-        });
+      });
+
+      // Append placeholder
+      setSessions(prev => {
+          const sess = { ...prev[sessionId] };
+          sess.messages = [...sess.messages, { role: 'model', text: '' }];
+          return { ...prev, [sessionId]: sess };
+      });
+
+      try {
+          const stream = generateChatStream(
+              apiHistory, 
+              analysis, 
+              prescriptionInput, 
+              reportContent, 
+              settings, 
+              controller.signal
+          );
+
+          let fullText = '';
+          let toolCallsResult: {id: string, name: string, args: any}[] = [];
+          
+          for await (const chunk of stream) {
+              if (chunk.text) {
+                  fullText += chunk.text;
+                  setSessions(prev => {
+                      const sess = { ...prev[sessionId] };
+                      const lastIdx = sess.messages.length - 1;
+                      if (lastIdx >= 0) {
+                          sess.messages[lastIdx] = { ...sess.messages[lastIdx], text: fullText };
+                      }
+                      return { ...prev, [sessionId]: sess };
+                  });
+              }
+              if (chunk.functionCalls) {
+                  toolCallsResult = chunk.functionCalls;
+              }
+          }
+
+          // === Handle Tool Calls ===
+          if (toolCallsResult.length > 0) {
+              setIsToolExecuting(true);
+              
+              const assistantToolCalls: OpenAIToolCall[] = toolCallsResult.map(tc => ({
+                  id: tc.id,
+                  type: 'function',
+                  function: {
+                      name: tc.name,
+                      arguments: JSON.stringify(tc.args)
+                  }
+              }));
+
+              const assistantMsg: Message = {
+                  role: 'model',
+                  text: fullText,
+                  toolCalls: assistantToolCalls
+              };
+
+              setSessions(prev => {
+                  const sess = { ...prev[sessionId] };
+                  sess.messages[sess.messages.length - 1] = assistantMsg;
+                  return { ...prev, [sessionId]: sess };
+              });
+              
+              const nextHistory = [...history, assistantMsg];
+
+              for (const tool of toolCallsResult) {
+                  console.log(`[Tool] Executing ${tool.name}`, tool.args);
+                  let result = "";
+                  
+                  if (tool.name === 'lookup_herb') {
+                      result = searchHerbsForAI(tool.args.query);
+                  } else if (tool.name === 'update_prescription') {
+                      onUpdatePrescription?.(tool.args.prescription);
+                      result = "Prescription updated successfully in frontend.";
+                  } else if (tool.name === 'regenerate_report') {
+                      onRegenerateReport?.(tool.args.instructions);
+                      result = "Report regeneration triggered.";
+                  } else {
+                      result = "Unknown tool.";
+                  }
+
+                  const toolMsg: Message = {
+                      role: 'tool',
+                      toolCallId: tool.id,
+                      functionName: tool.name,
+                      text: result
+                  };
+
+                  nextHistory.push(toolMsg);
+
+                  setSessions(prev => {
+                      const sess = { ...prev[sessionId] };
+                      sess.messages.push(toolMsg);
+                      return { ...prev, [sessionId]: sess };
+                  });
+              }
+              
+              await runGeneration(sessionId, nextHistory);
+          } else {
+              setIsToolExecuting(false);
+          }
+
+      } catch (e: any) {
+          setIsToolExecuting(false);
+          if (e.name === 'AbortError') {
+              console.log('Generation aborted.');
+          } else {
+              console.error('Generation failed:', e);
+              setSessions(prev => {
+                  const sess = { ...prev[sessionId] };
+                  const lastIdx = sess.messages.length - 1;
+                  const currentText = sess.messages[lastIdx].text;
+                  const errorText = `\n\n[系统错误: ${JSON.stringify(e)}]`;
+                  sess.messages[lastIdx] = { 
+                      ...sess.messages[lastIdx], 
+                      text: currentText + errorText,
+                      isError: !currentText 
+                  };
+                  return { ...prev, [sessionId]: sess };
+              });
+          }
+      } finally {
+          setIsLoading(false);
+          abortControllerRef.current = null;
       }
-      if (chunk.functionCalls && chunk.functionCalls.length > 0) {
-        console.log('Function call received:', chunk.functionCalls);
-        // Handle function calls logic here
-      }
-    }
-    abortControllerRef.current = null;
   };
-  
+
   // --- Render ---
   return (
-    <div className="w-full bg-white rounded-2xl shadow-xl border border-slate-200 flex h-full overflow-hidden">
-      {/* Sidebar */}
-      <div className="w-1/4 max-w-[300px] bg-slate-50 border-r border-slate-200 flex flex-col hidden md:flex">
+    <div className="flex h-full bg-white rounded-2xl shadow-xl overflow-hidden border border-slate-200">
+      
+      {/* Sidebar (Session List) */}
+      <div className="w-64 bg-slate-50 border-r border-slate-200 hidden md:flex flex-col">
         <div className="p-4 border-b border-slate-200">
-          <button 
-            onClick={createNewSession}
-            className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-indigo-600 text-white font-bold rounded-lg hover:bg-indigo-700 transition-all shadow-md shadow-indigo-100"
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
-            新的研讨
-          </button>
+           <button 
+             onClick={() => createNewSession()}
+             className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 rounded-xl shadow-lg shadow-indigo-200 transition-all flex items-center justify-center gap-2"
+           >
+             <span className="text-xl">+</span> 新的研讨
+           </button>
         </div>
-        <div className="flex-1 overflow-y-auto p-2 space-y-1">
-          {sortedSessions.map(session => (
-            <button 
-              key={session.id}
-              onClick={() => setActiveSessionId(session.id)}
-              className={`w-full text-left p-3 rounded-lg group transition-colors flex justify-between items-center ${activeSessionId === session.id ? 'bg-indigo-100' : 'hover:bg-slate-100'}`}
-            >
-              <span className={`text-sm font-medium truncate ${activeSessionId === session.id ? 'text-indigo-800' : 'text-slate-700'}`}>
-                {session.title}
-              </span>
-              <span 
-                onClick={(e) => handleDeleteSession(session.id, e)}
-                className="text-slate-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity p-1"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4"><path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" /></svg>
-              </span>
-            </button>
-          ))}
+        <div className="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar">
+           {Object.values(sessions)
+             .sort((a, b) => b.createdAt - a.createdAt)
+             .map(session => (
+               <div 
+                 key={session.id}
+                 onClick={() => setActiveSessionId(session.id)}
+                 className={`group flex items-center justify-between p-3 rounded-lg cursor-pointer transition-all border ${
+                   activeSessionId === session.id 
+                     ? 'bg-white border-indigo-200 shadow-sm' 
+                     : 'hover:bg-slate-200/50 border-transparent'
+                 }`}
+               >
+                 <div className="flex items-center gap-3 overflow-hidden">
+                    <span className={`text-lg ${activeSessionId === session.id ? 'text-indigo-600' : 'text-slate-400'}`}>
+                      {activeSessionId === session.id ? '💬' : '🗨️'}
+                    </span>
+                    <span className={`text-sm font-medium truncate ${activeSessionId === session.id ? 'text-slate-800' : 'text-slate-600'}`}>
+                      {session.title}
+                    </span>
+                 </div>
+                 <button 
+                   onClick={(e) => deleteSession(session.id, e)}
+                   className="opacity-0 group-hover:opacity-100 p-1.5 rounded-md hover:bg-red-50 text-slate-400 hover:text-red-500 transition-all z-10 relative"
+                   title="删除会话"
+                 >
+                   ✕
+                 </button>
+               </div>
+             ))}
         </div>
       </div>
 
-      {/* Main Chat Window */}
-      <div className="flex-1 flex flex-col">
-        <div className="p-4 border-b border-slate-100 bg-white flex justify-between items-center">
-          <div>
-            <h3 className="font-bold text-slate-800 text-lg">智能研讨助手</h3>
-            <p className="text-xs text-slate-500">当前模型: {settings.chatModel || 'Default'}</p>
-          </div>
-          {/* Mobile New Session Button */}
-          <button onClick={createNewSession} className="md:hidden text-indigo-600 font-bold text-sm">新会话</button>
+      {/* Main Chat Area */}
+      <div className="flex-1 flex flex-col relative bg-[#fcfcfc]">
+        {/* Header */}
+        <div className="h-16 border-b border-slate-100 flex items-center justify-between px-6 bg-white/80 backdrop-blur z-10">
+           <div>
+             <h3 className="font-bold text-slate-800 flex items-center gap-2">
+               智能研讨助手
+               <span className="text-[10px] bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full border border-slate-200">
+                 {settings.chatModel || 'Default Model'}
+               </span>
+               <span className="text-[10px] bg-emerald-50 text-emerald-600 px-2 py-0.5 rounded-full border border-emerald-100">
+                 药典已连接
+               </span>
+             </h3>
+           </div>
+           <div className="md:hidden">
+              <button onClick={() => createNewSession()} className="text-indigo-600 text-sm font-bold">新会话</button>
+           </div>
         </div>
-        
-        <div className="flex-1 overflow-y-auto p-6 space-y-6 bg-slate-50/30">
-          {activeMessages.map((msg, idx) => (
-             <div key={idx} className={`flex items-start gap-4 ${msg.role === 'user' ? 'flex-row-reverse' : 'flex-row'} group`}>
-                <Avatar role={msg.role} />
-                <div className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'} w-full max-w-[85%] lg:max-w-[75%]`}>
-                    
-                    {/* Message Bubble or Edit Input */}
-                    {editingMessageIndex === idx ? (
-                        <div className="w-full bg-white border border-indigo-200 rounded-2xl p-4 shadow-md">
-                            <textarea 
-                                value={editInput}
-                                onChange={e => setEditInput(e.target.value)}
-                                className="w-full h-24 p-2 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500 resize-none"
-                            />
-                            <div className="flex justify-end gap-2 mt-2">
-                                <button onClick={() => setEditingMessageIndex(null)} className="px-3 py-1 text-xs text-slate-500 hover:bg-slate-100 rounded">取消</button>
-                                <button onClick={() => handleSaveEdit(idx)} className="px-3 py-1 text-xs bg-indigo-600 text-white rounded hover:bg-indigo-700">保存并提交</button>
-                            </div>
-                        </div>
-                    ) : (
-                        <div className={`p-5 rounded-2xl text-lg leading-relaxed shadow-sm w-full ${msg.role === 'user' ? 'bg-indigo-600 text-white rounded-br-none' : 'bg-white text-slate-800 border border-slate-100 rounded-bl-none prose prose-slate prose-p:my-2 prose-headings:text-slate-900 prose-headings:font-bold prose-pre:bg-slate-100 prose-pre:text-slate-800 prose-code:text-indigo-600'}`}>
-                            {msg.isError ? (
-                                <div className='text-red-700 bg-red-50 p-2 rounded-lg border border-red-100'>
-                                <p className="font-bold">⚠️ 错误</p>
-                                <p className="text-sm mt-1">{msg.text}</p>
-                                </div>
-                            ) : (
-                                <ReactMarkdown components={{ p: ({ node, ...props }) => <p className="mb-2 last:mb-0" {...props} /> }}>
-                                {msg.text || '...'}
-                                </ReactMarkdown>
-                            )}
-                        </div>
-                    )}
 
-                    {/* Action Bar */}
-                    {!editingMessageIndex && !isLoading && (
-                        <div className={`flex items-center gap-2 mt-1 px-1 opacity-0 group-hover:opacity-100 transition-opacity ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                            {msg.role === 'user' ? (
-                                <button onClick={() => handleStartEdit(idx, msg.text)} className="text-[10px] text-slate-400 hover:text-indigo-600 flex items-center gap-1">
-                                    <span>✎</span> 编辑
-                                </button>
-                            ) : (
-                                <button onClick={() => handleRegenerate(idx)} className="text-[10px] text-slate-400 hover:text-indigo-600 flex items-center gap-1">
-                                    <span>↻</span> 重新生成
-                                </button>
-                            )}
-                             <button onClick={() => handleDeleteMessage(idx)} className="text-[10px] text-slate-400 hover:text-red-600 flex items-center gap-1 ml-2">
-                                    <span>✕</span> 删除
-                             </button>
-                        </div>
-                    )}
-                    
-                    {/* Continue Button (Last message AI only) */}
-                    {!isLoading && msg.role === 'model' && idx === activeMessages.length - 1 && (
-                         <div className="mt-2">
-                             <button onClick={handleContinue} className="text-xs bg-indigo-50 text-indigo-600 px-3 py-1 rounded-full border border-indigo-100 hover:bg-indigo-100 flex items-center gap-1">
-                                 <span>➜</span> 继续生成
-                             </button>
-                         </div>
-                    )}
-                </div>
+        {/* Messages List */}
+        <div className="flex-1 overflow-y-auto p-6 scroll-smooth custom-scrollbar">
+           {activeMessages.length === 0 ? (
+             <div className="h-full flex flex-col items-center justify-center text-slate-400 space-y-4">
+                <div className="w-20 h-20 bg-slate-100 rounded-full flex items-center justify-center text-4xl">🤖</div>
+                <p>暂无消息，请开始提问。</p>
              </div>
-          ))}
-          <div ref={messagesEndRef} />
+           ) : (
+             activeMessages.map((msg, i) => (
+               <ChatMessageItem 
+                 key={i} 
+                 index={i} 
+                 message={msg} 
+                 isLoading={isLoading}
+                 isLast={i === activeMessages.length - 1}
+                 onDelete={handleDeleteMessage}
+                 onRegenerate={handleRegenerate}
+                 onEdit={handleEditMessage}
+                 onContinue={handleContinue}
+                 onHerbClick={onHerbClick}
+                 herbRegex={herbRegex}
+               />
+             ))
+           )}
+           <div ref={messagesEndRef} className="h-4" />
         </div>
         
-        <div className="p-4 bg-white border-t border-slate-100">
-          <div className="flex gap-4 relative items-end">
-            <textarea
-              ref={textareaRef}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
-              placeholder="输入问题，或要求修改处方... (Shift + Enter 换行)"
-              className="flex-1 bg-slate-100 border border-slate-200 rounded-xl px-6 py-4 text-lg focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:border-indigo-500 transition-all shadow-inner resize-none max-h-48"
-              rows={1}
-              disabled={isLoading}
-            />
-            {isLoading ? (
+        {/* Tool Execution Indicator (Floating) */}
+        {isToolExecuting && (
+             <div className="absolute bottom-24 left-1/2 -translate-x-1/2 bg-white/90 backdrop-blur border border-indigo-100 shadow-lg px-4 py-2 rounded-full flex items-center gap-3 animate-in fade-in slide-in-from-bottom-2 z-30">
+                 <div className="w-4 h-4 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin"></div>
+                 <span className="text-xs font-bold text-indigo-700">正在查阅药典数据库...</span>
+             </div>
+        )}
+
+        {/* Input Area */}
+        <div className="p-6 bg-white border-t border-slate-100 relative z-20">
+           <div className="flex gap-4 items-end max-w-5xl mx-auto">
+              <div className="flex-1 relative">
+                <textarea
+                  ref={textareaRef}
+                  value={input}
+                  onChange={e => setInput(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      handleSend();
+                    }
+                  }}
+                  placeholder={isLoading ? "AI 正在思考中 (可调用工具)..." : "输入问题，Shift+Enter 换行..."}
+                  disabled={isLoading}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-5 py-4 text-base focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 outline-none resize-none shadow-inner transition-all disabled:bg-slate-100 disabled:text-slate-400 font-sans"
+                  rows={1}
+                />
+                <div className="absolute right-3 bottom-3 text-[10px] text-slate-400 font-medium bg-white/50 px-2 rounded pointer-events-none">
+                   支持 Markdown & HTML
+                </div>
+              </div>
+              
+              {isLoading ? (
                 <button 
                   onClick={handleStop}
-                  className="w-14 h-14 bg-red-500 text-white rounded-xl hover:bg-red-600 transition-colors shadow-lg shadow-red-200 flex items-center justify-center shrink-0 animate-pulse"
+                  className="h-[52px] w-[52px] rounded-2xl bg-red-50 text-red-500 border border-red-100 hover:bg-red-100 hover:border-red-200 flex items-center justify-center shadow-sm transition-all group"
                   title="停止生成"
                 >
-                  <div className="w-4 h-4 bg-white rounded-sm"></div>
+                  <span className="w-3 h-3 bg-red-500 rounded-sm group-hover:scale-110 transition-transform"></span>
                 </button>
-            ) : (
+              ) : (
                 <button 
-                onClick={handleSend} 
-                disabled={!input.trim()} 
-                className="w-14 h-14 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-lg shadow-indigo-200 flex items-center justify-center shrink-0"
+                  onClick={handleSend}
+                  disabled={!input.trim()}
+                  className="h-[52px] w-[52px] rounded-2xl bg-indigo-600 text-white flex items-center justify-center shadow-lg shadow-indigo-200 hover:bg-indigo-700 hover:scale-105 active:scale-95 transition-all disabled:bg-slate-300 disabled:shadow-none disabled:cursor-not-allowed"
                 >
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" className="w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>
                 </button>
-            )}
-          </div>
+              )}
+           </div>
+           <div className="text-center mt-2 text-xs text-slate-400">
+              AI生成内容仅供参考，已接入2025药典数据库。
+           </div>
         </div>
       </div>
     </div>
   );
 };
-
-
-// ==========================================
-// 3. Sub-Components
-// ==========================================
-const Avatar = ({ role }: { role: 'user' | 'model' | 'function' }) => (
-  <div className={`w-8 h-8 rounded-full flex-shrink-0 flex items-center justify-center text-sm font-bold shadow-inner ${role === 'user' ? 'bg-indigo-100 text-indigo-700' : 'bg-slate-200 text-slate-600'}`}>
-    {role === 'user' ? '您' : 'AI'}
-  </div>
-);
