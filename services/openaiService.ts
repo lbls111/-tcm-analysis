@@ -1,5 +1,5 @@
 
-import { AnalysisResult, Constitution, AdministrationMode, AISettings, ModelOption, BenCaoHerb } from "../types";
+import { AnalysisResult, AISettings, ModelOption, BenCaoHerb } from "../types";
 
 // ==========================================
 // 1. Types & Interfaces for OpenAI API
@@ -301,6 +301,7 @@ const CHAT_SYSTEM_INSTRUCTION = (analysis: AnalysisResult, prescription: string,
 1. **忠于数据**: 你的所有分析都必须基于下面提供的【静态计算数据】和【AI深度报告】。
 2. **工具优先**: 当用户的意图符合工具描述时（修改处方、重构报告），必须优先调用工具，而不是自己生成文本回复。
 3. **简明扼要**: 回答问题要直接、清晰。
+4. **格式美观**: 使用 Markdown 格式输出。对于重要结论、列表、代码块，请合理使用加粗、列表、引用等格式，确保排版美观易读。
 
 ---
 ### **当前处方上下文 (Current Context)**
@@ -468,17 +469,15 @@ export const generateHerbDataWithAI = async (herbName: string, settings: AISetti
 export async function* analyzePrescriptionWithAI(
     analysis: AnalysisResult,
     prescriptionInput: string,
-    constitution: Constitution,
-    adminMode: AdministrationMode,
     settings: AISettings,
     regenerateInstructions?: string,
-    existingReport?: string 
+    existingReport?: string,
+    signal?: AbortSignal
 ): AsyncGenerator<string, void, unknown> {
     const url = `${getBaseUrl(settings.apiBaseUrl)}/chat/completions`;
     
+    // 移除默认体质和煎服法的硬编码上下文，让AI专注于方剂本身
     const context = `
-    【患者体质】: ${constitution}
-    【服药方式】: ${adminMode}
     【处方原文】: ${prescriptionInput}
     【计算数据】: 总寒热指数 ${analysis.totalPTI.toFixed(2)} ( >0 热, <0 寒); 
     【三焦分布】: 上焦 ${analysis.sanJiao.upper.percentage.toFixed(0)}%, 中焦 ${analysis.sanJiao.middle.percentage.toFixed(0)}%, 下焦 ${analysis.sanJiao.lower.percentage.toFixed(0)}%
@@ -512,7 +511,8 @@ export async function* analyzePrescriptionWithAI(
     const res = await fetch(url, {
         method: "POST",
         headers: getHeaders(settings.apiKey),
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
+        signal: signal
     });
 
     if (!res.ok) {
@@ -525,31 +525,35 @@ export async function* analyzePrescriptionWithAI(
     const decoder = new TextDecoder("utf-8");
     let buffer = "";
 
-    while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
+    try {
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop() || "";
 
-        for (const line of lines) {
-            if (line.trim().startsWith("data: ")) {
-                const dataStr = line.slice(6).trim();
-                if (dataStr === "[DONE]") {
-                    return;
-                }
-                try {
-                    const json = JSON.parse(dataStr);
-                    const chunk = json.choices[0]?.delta?.content;
-                    if (chunk) {
-                        yield chunk;
+            for (const line of lines) {
+                if (line.trim().startsWith("data: ")) {
+                    const dataStr = line.slice(6).trim();
+                    if (dataStr === "[DONE]") {
+                        return;
                     }
-                } catch (e) {
-                    // Ignore parsing errors for incomplete chunks
+                    try {
+                        const json = JSON.parse(dataStr);
+                        const chunk = json.choices[0]?.delta?.content;
+                        if (chunk) {
+                            yield chunk;
+                        }
+                    } catch (e) {
+                        // Ignore parsing errors for incomplete chunks
+                    }
                 }
             }
         }
+    } finally {
+        reader.releaseLock();
     }
 };
 
@@ -561,7 +565,8 @@ export async function* generateChatStream(
     analysis: AnalysisResult,
     prescription: string,
     reportContent: string | undefined,
-    settings: AISettings
+    settings: AISettings,
+    signal?: AbortSignal
 ): AsyncGenerator<{ text?: string, functionCalls?: any[] }, void, unknown> {
     const url = `${getBaseUrl(settings.apiBaseUrl)}/chat/completions`;
     
@@ -613,7 +618,8 @@ export async function* generateChatStream(
     const res = await fetch(url, {
         method: "POST",
         headers: getHeaders(settings.apiKey),
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
+        signal: signal
     });
 
     if (!res.ok) {

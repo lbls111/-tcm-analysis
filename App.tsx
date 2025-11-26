@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { analyzePrescriptionWithAI, generateHerbDataWithAI, DEFAULT_ANALYZE_SYSTEM_INSTRUCTION } from './services/openaiService';
 import { calculatePrescription, getPTILabel } from './utils/tcmMath';
 import { parsePrescription } from './utils/prescriptionParser';
@@ -35,8 +35,9 @@ function App() {
   const [reports, setReports] = useState<Record<string, string>>({});
   const [activeReportVersion, setActiveReportVersion] = useState<string>('V1');
   const [isReportIncomplete, setIsReportIncomplete] = useState(false);
-  const constitution = Constitution.NEUTRAL;
-  const adminMode = AdministrationMode.STANDARD;
+  
+  // Removed hardcoded constitution and adminMode constants as per user request
+  
   const [fontSettings, setFontSettings] = useState({
     family: 'font-serif-sc', 
     scale: 1.0,
@@ -62,6 +63,9 @@ function App() {
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
   const [initialDosageRef, setInitialDosageRef] = useState<number | null>(null);
   const [viewingHerb, setViewingHerb] = useState<BenCaoHerb | null>(null);
+  
+  // Abort Controller for stopping AI generation
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     const savedReports = localStorage.getItem(LS_REPORTS_KEY);
@@ -139,7 +143,8 @@ function App() {
   const handleStartCalculation = () => {
     try {
       const herbs = parsePrescription(input);
-      const result = calculatePrescription(herbs, constitution, adminMode);
+      // Removed adminMode and constitution arguments
+      const result = calculatePrescription(herbs);
       setAnalysis(result);
       setInitialDosageRef(result.initialTotalDosage); 
       setView(ViewMode.WORKSHOP);
@@ -147,6 +152,19 @@ function App() {
       console.error(e);
       alert("计算出错，请检查输入格式");
     }
+  };
+  
+  const handleStopAI = () => {
+      if (abortControllerRef.current) {
+          abortControllerRef.current.abort();
+          abortControllerRef.current = null;
+          setAiLoading(false);
+          // Optional: Add a message indicating stopped
+          setReports(prev => {
+              const current = prev[activeReportVersion] || '';
+              return { ...prev, [activeReportVersion]: current + "\n\n<!-- 生成已由用户手动停止 -->" };
+          });
+      }
   };
 
   const handleAskAI = async (regenerateInstructions?: string) => {
@@ -162,6 +180,10 @@ function App() {
     setAiLoading(true);
     setAiError(null);
 
+    // Create new abort controller
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
     const newVersionKey = `V${Object.keys(reports).length + 1}`;
     setActiveReportVersion(newVersionKey);
     setReports(prev => ({ ...prev, [newVersionKey]: '' })); // Initialize for streaming
@@ -170,10 +192,10 @@ function App() {
       const stream = analyzePrescriptionWithAI(
         analysis,
         input,
-        constitution,
-        adminMode,
         aiSettings,
-        regenerateInstructions
+        regenerateInstructions,
+        undefined,
+        controller.signal
       );
 
       let htmlContent = '';
@@ -186,6 +208,10 @@ function App() {
       setIsReportIncomplete(!isComplete);
 
     } catch (err: any) {
+      if (err.name === 'AbortError') {
+          console.log('AI generation aborted by user');
+          return;
+      }
       console.error(err);
       setAiError(err.message || "请求 AI 时发生未知错误");
       setReports(prev => {
@@ -199,6 +225,7 @@ function App() {
       });
     } finally {
       setAiLoading(false);
+      abortControllerRef.current = null;
     }
   };
 
@@ -208,17 +235,20 @@ function App() {
     setAiLoading(true);
     setAiError(null);
     
+    // Create new abort controller
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    
     try {
       const partialReport = reports[activeReportVersion];
       
       const stream = analyzePrescriptionWithAI(
         analysis,
         input,
-        constitution,
-        adminMode,
         aiSettings,
         undefined,
-        partialReport
+        partialReport,
+        controller.signal
       );
 
       let finalContent = partialReport;
@@ -231,10 +261,15 @@ function App() {
       setIsReportIncomplete(!isNowComplete);
 
     } catch (err: any) {
+      if (err.name === 'AbortError') {
+        console.log('AI continuation aborted by user');
+        return;
+      }
       console.error(err);
       setAiError(err.message || "续写报告时发生错误。");
     } finally {
       setAiLoading(false);
+      abortControllerRef.current = null;
     }
   };
 
@@ -266,7 +301,7 @@ function App() {
     setInput(newPrescription);
     try {
       const herbs = parsePrescription(newPrescription);
-      const result = calculatePrescription(herbs, constitution, adminMode);
+      const result = calculatePrescription(herbs); // Removed params
       setAnalysis(result);
       setInitialDosageRef(result.initialTotalDosage);
     } catch (e) {
@@ -641,6 +676,9 @@ function App() {
                    <h2 className="text-xl font-bold text-slate-800">AI 正在进行深度战略审计...</h2>
                    <p className="text-slate-400 mt-2">正在进行处方逆向工程、风险矩阵构建与三焦动态校准</p>
                    <p className="text-slate-300 text-xs mt-4">正在调用大语言模型进行长文本推演，可能需要20-60秒，请耐心等待...</p>
+                   <button onClick={handleStopAI} className="mt-8 px-6 py-2 bg-red-50 text-red-600 rounded-lg border border-red-200 hover:bg-red-100 font-bold transition-all">
+                       🛑 停止生成
+                   </button>
                 </div>
               ) : aiError ? (
                 <div className="text-center py-32 bg-white rounded-3xl border border-red-100">
@@ -678,17 +716,23 @@ function App() {
                        </div>
                     )}
                     
-                    <div className="flex justify-end gap-3">
+                    <div className="flex justify-end gap-3 flex-wrap">
+                        {aiLoading && (
+                            <button onClick={handleStopAI} className="text-xs font-bold text-red-600 bg-red-50 px-3 py-1.5 rounded-lg border border-red-100 hover:bg-red-100 flex items-center gap-1 animate-pulse">
+                                🛑 停止
+                            </button>
+                        )}
                         <button 
                             onClick={() => handleAskAI("请重新生成一份更详细的报告")} 
                             className="text-xs font-bold text-indigo-600 bg-indigo-50 px-3 py-1.5 rounded-lg border border-indigo-100 hover:bg-indigo-100 flex items-center gap-1"
+                            disabled={aiLoading}
                         >
                            <span>✨</span> 重新生成
                         </button>
                         <button onClick={handleCopyHtml} className="text-xs font-bold text-slate-600 bg-white px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50">
                            复制代码
                         </button>
-                        <button onClick={handleDeleteReportVersion} className="text-xs font-bold text-red-600 bg-red-50 px-3 py-1.5 rounded-lg border border-red-100 hover:bg-red-100">
+                        <button onClick={handleDeleteReportVersion} className="text-xs font-bold text-red-600 bg-red-50 px-3 py-1.5 rounded-lg border border-red-100 hover:bg-red-100" disabled={aiLoading}>
                            删除此版本
                         </button>
                     </div>

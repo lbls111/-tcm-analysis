@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { generateChatStream, OpenAIMessage } from '../services/openaiService';
 import { AnalysisResult, AISettings } from '../types';
@@ -49,9 +50,12 @@ export const AIChatbot: React.FC<Props> = ({
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [editingMessageIndex, setEditingMessageIndex] = useState<number | null>(null);
+  const [editInput, setEditInput] = useState('');
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   // --- Derived State ---
   const activeMessages = useMemo(() => {
@@ -67,12 +71,8 @@ export const AIChatbot: React.FC<Props> = ({
     try {
       const saved = localStorage.getItem(LS_CHAT_SESSIONS_KEY);
       if (saved) {
-        // FIX: In strict TypeScript configurations, JSON.parse returns `unknown`.
-        // We must perform a type check before we can safely use the parsed data.
-        // Fix: Changed unknown to any to help compiler with type inference in this context.
         const parsed: any = JSON.parse(saved);
 
-        // Type guard to ensure parsed is a non-array object.
         if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
           const sessionsData = parsed as Record<string, Session>;
           if (Object.keys(sessionsData).length > 0) {
@@ -132,8 +132,6 @@ export const AIChatbot: React.FC<Props> = ({
     e.stopPropagation();
     if (!window.confirm("确定要删除这个会话吗？")) return;
 
-    // FIX: Refactor state updates to be within a single functional update call.
-    // This prevents stale state issues and ensures type safety.
     setSessions(prev => {
       const newSessions = { ...prev };
       delete newSessions[sessionId];
@@ -141,11 +139,8 @@ export const AIChatbot: React.FC<Props> = ({
       if (activeSessionId === sessionId) {
         const remainingSessions = Object.values(newSessions).sort((a, b) => b.createdAt - a.createdAt);
         if (remainingSessions.length > 0) {
-          // We must update the active session ID here, based on the *new* sessions list.
           setActiveSessionId(remainingSessions[0].id);
         } else {
-          // If no sessions remain, create a new one.
-          // Replicating createNewSession logic here to avoid nested state updates.
           const newId = `session_${Date.now()}`;
           const newSession: Session = {
             id: newId,
@@ -161,6 +156,106 @@ export const AIChatbot: React.FC<Props> = ({
     });
   };
   
+  // --- Message Actions ---
+  const handleStop = () => {
+      if (abortControllerRef.current) {
+          abortControllerRef.current.abort();
+          abortControllerRef.current = null;
+          setIsLoading(false);
+      }
+  };
+
+  const handleDeleteMessage = (index: number) => {
+    if (!activeSessionId) return;
+    setSessions(prev => {
+        const newSessions = { ...prev };
+        const session = { ...newSessions[activeSessionId] };
+        session.messages = session.messages.filter((_, i) => i !== index);
+        newSessions[activeSessionId] = session;
+        return newSessions;
+    });
+  };
+
+  const handleStartEdit = (index: number, text: string) => {
+      setEditingMessageIndex(index);
+      setEditInput(text);
+  };
+
+  const handleSaveEdit = async (index: number) => {
+      if (!activeSessionId || !editInput.trim()) return;
+      
+      // Update the user message, remove all subsequent messages, and regenerate
+      const session = sessions[activeSessionId];
+      const newHistory = session.messages.slice(0, index + 1); // Keep up to the edited message
+      newHistory[index].text = editInput; // Update text
+
+      setSessions(prev => ({
+          ...prev,
+          [activeSessionId]: {
+              ...prev[activeSessionId],
+              messages: newHistory
+          }
+      }));
+      setEditingMessageIndex(null);
+      
+      setIsLoading(true);
+      try {
+          // Regenerate based on the new history (excluding the now last message which is the user input to be sent)
+          await runGeneration(activeSessionId, newHistory); 
+      } catch (error) {
+          console.error("Regeneration failed", error);
+      } finally {
+          setIsLoading(false);
+      }
+  };
+
+  const handleRegenerate = async (index: number) => {
+      if (!activeSessionId) return;
+      const session = sessions[activeSessionId];
+      // Keep messages UP TO the one *before* this AI message
+      // Assuming 'index' is the AI message we want to regenerate.
+      const newHistory = session.messages.slice(0, index);
+      
+      setSessions(prev => ({
+          ...prev,
+          [activeSessionId]: {
+              ...prev[activeSessionId],
+              messages: newHistory
+          }
+      }));
+
+      setIsLoading(true);
+      try {
+          await runGeneration(activeSessionId, newHistory);
+      } catch (error) {
+          console.error("Regeneration failed", error);
+      } finally {
+          setIsLoading(false);
+      }
+  };
+
+  const handleContinue = async () => {
+      if (!activeSessionId) return;
+      const userMsg: Message = { role: 'user', text: "请继续 (Please continue)" };
+      
+      setSessions(prev => {
+        const newSessions = { ...prev };
+        const session = { ...newSessions[activeSessionId] };
+        session.messages = [...session.messages, userMsg];
+        newSessions[activeSessionId] = session;
+        return newSessions;
+      });
+      
+      setIsLoading(true);
+      try {
+        await runGeneration(activeSessionId, [...sessions[activeSessionId].messages, userMsg]);
+      } catch (e) {
+          console.error(e);
+      } finally {
+          setIsLoading(false);
+      }
+  };
+
   // --- Core Logic ---
   const handleSend = async () => {
     if (!input.trim() || isLoading) return;
@@ -192,6 +287,10 @@ export const AIChatbot: React.FC<Props> = ({
     try {
       await runGeneration(targetSessionId, [...sessions[targetSessionId!].messages, userMsg]);
     } catch (error: any) {
+      if (error.name === 'AbortError') {
+          console.log('Chat aborted');
+          return;
+      }
       console.error("Chat generation failed:", error);
       const errorMsg: Message = {
         role: 'model',
@@ -219,10 +318,15 @@ export const AIChatbot: React.FC<Props> = ({
         content: m.text,
       } as OpenAIMessage));
 
-    const stream = generateChatStream(apiHistory, analysis, prescriptionInput, reportContent, settings);
+    // Abort controller
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
+    const stream = generateChatStream(apiHistory, analysis, prescriptionInput, reportContent, settings, controller.signal);
     
     let modelResponseText = '';
     
+    // Optimistic update: Add empty AI message
     setSessions(prev => {
         const newSessions = { ...prev };
         const session = { ...newSessions[sessionId] };
@@ -250,13 +354,14 @@ export const AIChatbot: React.FC<Props> = ({
         // Handle function calls logic here
       }
     }
+    abortControllerRef.current = null;
   };
   
   // --- Render ---
   return (
     <div className="w-full bg-white rounded-2xl shadow-xl border border-slate-200 flex h-full overflow-hidden">
       {/* Sidebar */}
-      <div className="w-1/4 max-w-[300px] bg-slate-50 border-r border-slate-200 flex flex-col">
+      <div className="w-1/4 max-w-[300px] bg-slate-50 border-r border-slate-200 flex flex-col hidden md:flex">
         <div className="p-4 border-b border-slate-200">
           <button 
             onClick={createNewSession}
@@ -294,17 +399,78 @@ export const AIChatbot: React.FC<Props> = ({
             <h3 className="font-bold text-slate-800 text-lg">智能研讨助手</h3>
             <p className="text-xs text-slate-500">当前模型: {settings.chatModel || 'Default'}</p>
           </div>
+          {/* Mobile New Session Button */}
+          <button onClick={createNewSession} className="md:hidden text-indigo-600 font-bold text-sm">新会话</button>
         </div>
         
         <div className="flex-1 overflow-y-auto p-6 space-y-6 bg-slate-50/30">
           {activeMessages.map((msg, idx) => (
-            <MessageBubble key={idx} msg={msg} />
+             <div key={idx} className={`flex items-start gap-4 ${msg.role === 'user' ? 'flex-row-reverse' : 'flex-row'} group`}>
+                <Avatar role={msg.role} />
+                <div className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'} w-full max-w-[85%] lg:max-w-[75%]`}>
+                    
+                    {/* Message Bubble or Edit Input */}
+                    {editingMessageIndex === idx ? (
+                        <div className="w-full bg-white border border-indigo-200 rounded-2xl p-4 shadow-md">
+                            <textarea 
+                                value={editInput}
+                                onChange={e => setEditInput(e.target.value)}
+                                className="w-full h-24 p-2 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-500 resize-none"
+                            />
+                            <div className="flex justify-end gap-2 mt-2">
+                                <button onClick={() => setEditingMessageIndex(null)} className="px-3 py-1 text-xs text-slate-500 hover:bg-slate-100 rounded">取消</button>
+                                <button onClick={() => handleSaveEdit(idx)} className="px-3 py-1 text-xs bg-indigo-600 text-white rounded hover:bg-indigo-700">保存并提交</button>
+                            </div>
+                        </div>
+                    ) : (
+                        <div className={`p-5 rounded-2xl text-lg leading-relaxed shadow-sm w-full ${msg.role === 'user' ? 'bg-indigo-600 text-white rounded-br-none' : 'bg-white text-slate-800 border border-slate-100 rounded-bl-none prose prose-slate prose-p:my-2 prose-headings:text-slate-900 prose-headings:font-bold prose-pre:bg-slate-100 prose-pre:text-slate-800 prose-code:text-indigo-600'}`}>
+                            {msg.isError ? (
+                                <div className='text-red-700 bg-red-50 p-2 rounded-lg border border-red-100'>
+                                <p className="font-bold">⚠️ 错误</p>
+                                <p className="text-sm mt-1">{msg.text}</p>
+                                </div>
+                            ) : (
+                                <ReactMarkdown components={{ p: ({ node, ...props }) => <p className="mb-2 last:mb-0" {...props} /> }}>
+                                {msg.text || '...'}
+                                </ReactMarkdown>
+                            )}
+                        </div>
+                    )}
+
+                    {/* Action Bar */}
+                    {!editingMessageIndex && !isLoading && (
+                        <div className={`flex items-center gap-2 mt-1 px-1 opacity-0 group-hover:opacity-100 transition-opacity ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                            {msg.role === 'user' ? (
+                                <button onClick={() => handleStartEdit(idx, msg.text)} className="text-[10px] text-slate-400 hover:text-indigo-600 flex items-center gap-1">
+                                    <span>✎</span> 编辑
+                                </button>
+                            ) : (
+                                <button onClick={() => handleRegenerate(idx)} className="text-[10px] text-slate-400 hover:text-indigo-600 flex items-center gap-1">
+                                    <span>↻</span> 重新生成
+                                </button>
+                            )}
+                             <button onClick={() => handleDeleteMessage(idx)} className="text-[10px] text-slate-400 hover:text-red-600 flex items-center gap-1 ml-2">
+                                    <span>✕</span> 删除
+                             </button>
+                        </div>
+                    )}
+                    
+                    {/* Continue Button (Last message AI only) */}
+                    {!isLoading && msg.role === 'model' && idx === activeMessages.length - 1 && (
+                         <div className="mt-2">
+                             <button onClick={handleContinue} className="text-xs bg-indigo-50 text-indigo-600 px-3 py-1 rounded-full border border-indigo-100 hover:bg-indigo-100 flex items-center gap-1">
+                                 <span>➜</span> 继续生成
+                             </button>
+                         </div>
+                    )}
+                </div>
+             </div>
           ))}
           <div ref={messagesEndRef} />
         </div>
         
         <div className="p-4 bg-white border-t border-slate-100">
-          <div className="flex gap-4 relative">
+          <div className="flex gap-4 relative items-end">
             <textarea
               ref={textareaRef}
               value={input}
@@ -315,13 +481,23 @@ export const AIChatbot: React.FC<Props> = ({
               rows={1}
               disabled={isLoading}
             />
-            <button 
-              onClick={handleSend} 
-              disabled={isLoading || !input.trim()} 
-              className="w-14 h-14 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-lg shadow-indigo-200 flex items-center justify-center shrink-0"
-            >
-              {isLoading ? <div className="w-5 h-5 border-2 border-white/50 border-t-white rounded-full animate-spin"></div> : <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>}
-            </button>
+            {isLoading ? (
+                <button 
+                  onClick={handleStop}
+                  className="w-14 h-14 bg-red-500 text-white rounded-xl hover:bg-red-600 transition-colors shadow-lg shadow-red-200 flex items-center justify-center shrink-0 animate-pulse"
+                  title="停止生成"
+                >
+                  <div className="w-4 h-4 bg-white rounded-sm"></div>
+                </button>
+            ) : (
+                <button 
+                onClick={handleSend} 
+                disabled={!input.trim()} 
+                className="w-14 h-14 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-lg shadow-indigo-200 flex items-center justify-center shrink-0"
+                >
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" /></svg>
+                </button>
+            )}
           </div>
         </div>
       </div>
@@ -333,30 +509,8 @@ export const AIChatbot: React.FC<Props> = ({
 // ==========================================
 // 3. Sub-Components
 // ==========================================
-const Avatar = ({ role }: { role: 'user' | 'model' }) => (
+const Avatar = ({ role }: { role: 'user' | 'model' | 'function' }) => (
   <div className={`w-8 h-8 rounded-full flex-shrink-0 flex items-center justify-center text-sm font-bold shadow-inner ${role === 'user' ? 'bg-indigo-100 text-indigo-700' : 'bg-slate-200 text-slate-600'}`}>
     {role === 'user' ? '您' : 'AI'}
   </div>
 );
-
-const MessageBubble: React.FC<{ msg: Message }> = ({ msg }) => {
-  return (
-    <div className={`flex items-start gap-4 ${msg.role === 'user' ? 'flex-row-reverse' : 'flex-row'}`}>
-      <Avatar role={msg.role} />
-      <div className={`flex flex-col group ${msg.role === 'user' ? 'items-end' : 'items-start'} w-full`}>
-        <div className={`max-w-[85%] lg:max-w-[75%] p-5 rounded-2xl text-lg leading-relaxed shadow-sm ${msg.role === 'user' ? 'bg-indigo-600 text-white rounded-br-none' : 'bg-white text-slate-800 border border-slate-100 rounded-bl-none'}`}>
-          {msg.isError ? (
-            <div className='text-red-700 bg-red-50 p-2 rounded-lg border border-red-100'>
-              <p className="font-bold">⚠️ 错误</p>
-              <p className="text-sm mt-1">{msg.text}</p>
-            </div>
-          ) : (
-            <ReactMarkdown components={{ p: ({ node, ...props }) => <p className="mb-3 last:mb-0" {...props} /> }}>
-              {msg.text || '...'}
-            </ReactMarkdown>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-};
