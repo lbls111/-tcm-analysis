@@ -1,4 +1,5 @@
 
+
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { generateChatStream, OpenAIMessage, OpenAIToolCall } from '../services/openaiService';
 import { AnalysisResult, AISettings } from '../types';
@@ -675,9 +676,9 @@ export const AIChatbot: React.FC<Props> = ({
            </button>
         </div>
         <div className="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar">
-           {Object.values(sessions)
+           {(Object.values(sessions) as Session[])
              .sort((a, b) => b.createdAt - a.createdAt)
-             .map(session => (
+             .map((session) => (
                <div 
                  key={session.id}
                  onClick={() => setActiveSessionId(session.id)}
