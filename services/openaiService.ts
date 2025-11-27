@@ -1,4 +1,6 @@
 
+
+
 import { AnalysisResult, AISettings, ModelOption, BenCaoHerb } from "../types";
 
 // ==========================================
@@ -141,6 +143,10 @@ const CHAT_SYSTEM_INSTRUCTION = (analysis: AnalysisResult, prescription: string,
 **强制引用规则 (Strict Citation Protocols):**
 在回答任何医学判断时，必须显式引用【AI分析报告】或【元信息】作为依据。
 例如: "根据 [[AI报告]] 中的分析，此方主治..." 或 "结合 [[元信息]] 中提到的患者失眠症状..."
+
+**动态元信息更新 (Meta Info Evolution):**
+如果用户在对话中提供了新的病情、症状或背景信息（例如“患者其实有高血压”或“最近睡眠变差了”），你**必须**调用 \`update_meta_info\` 工具来更新元信息。这能让你在后续对话中记住这些新情况。
+请主动询问或侦测这些信息变化，并积极更新病历。
 
 **重要规则:**
 1. **查库工具**: 用户询问具体药材详情时，**必须**调用 \`lookup_herb\`。
@@ -557,6 +563,20 @@ export async function* generateChatStream(
                             instructions: { type: "string", description: "Specific instructions for regeneration" }
                         },
                         required: ["instructions"]
+                    }
+                }
+            },
+            {
+                type: "function",
+                function: {
+                    name: "update_meta_info",
+                    description: "Update the patient's medical record (Meta Info) based on new findings, symptoms, or corrections provided in the chat. Use this to maintain an evolving patient context.",
+                    parameters: {
+                        type: "object",
+                        properties: {
+                            new_info: { type: "string", description: "The updated and consolidated medical record text. Should include patient background, main complaints, and key symptoms." }
+                        },
+                        required: ["new_info"]
                     }
                 }
             }

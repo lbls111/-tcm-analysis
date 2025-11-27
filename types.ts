@@ -3,6 +3,7 @@
 
 
 
+
 export enum Flavor {
   PUNGENT = '辛',
   BITTER = '苦',
@@ -194,6 +195,7 @@ export interface CloudChatSession {
   id: string;
   title: string;
   messages: any[]; // JSONB
+  meta_info?: string; // New: Patient/Context Info stored with session
   created_at: number; // Timestamp
   updated_at?: string; // ISO String from DB
 }

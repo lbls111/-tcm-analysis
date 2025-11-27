@@ -1,4 +1,6 @@
 
+
+
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { AISettings, BenCaoHerb, CloudReport, CloudChatSession } from '../types';
 
@@ -287,6 +289,7 @@ export const saveCloudChatSession = async (session: CloudChatSession, settings: 
             id: session.id,
             title: session.title,
             messages: session.messages,
+            meta_info: session.meta_info || null, // Ensure explicit null if undefined
             created_at: session.created_at
         };
 

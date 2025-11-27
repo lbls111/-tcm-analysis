@@ -1,10 +1,13 @@
 
+
+
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { generateChatStream, OpenAIMessage, OpenAIToolCall, summarizeMessages } from '../services/openaiService';
 import { AnalysisResult, AISettings } from '../types';
 import { searchHerbsForAI, FULL_HERB_LIST } from '../data/herbDatabase';
 import { fetchCloudChatSessions, saveCloudChatSession, deleteCloudChatSession } from '../services/supabaseService';
 import { MetaInfoModal } from './MetaInfoModal';
+import { ChatMemoryModal } from './ChatMemoryModal';
 
 // ==========================================
 // 1. Types
@@ -304,6 +307,7 @@ export const AIChatbot: React.FC<Props> = ({
   const [isToolExecuting, setIsToolExecuting] = useState(false);
   const [isSavingCloud, setIsSavingCloud] = useState(false);
   const [showMetaModal, setShowMetaModal] = useState(false);
+  const [showMemoryModal, setShowMemoryModal] = useState(false);
   const [viewingReference, setViewingReference] = useState<{type: 'report' | 'meta', content: string} | null>(null);
   const [tokenCount, setTokenCount] = useState<number>(0);
   const [isCompressing, setIsCompressing] = useState(false);
@@ -353,6 +357,10 @@ export const AIChatbot: React.FC<Props> = ({
                 });
                 setSessions(sessionMap);
                 setActiveSessionId(cloudSessions[0].id);
+                // Load meta info from latest session if available
+                if (cloudSessions[0].meta_info) {
+                    onUpdateMetaInfo(cloudSessions[0].meta_info);
+                }
                 loadedFromCloud = true;
             }
         }
@@ -429,36 +437,41 @@ export const AIChatbot: React.FC<Props> = ({
                  id: sess.id,
                  title: sess.title,
                  messages: sess.messages,
+                 meta_info: metaInfo, // Sync current meta info with session
                  created_at: sess.createdAt
              }, settings).catch(e => console.error("Cloud sync failed", e));
         }
     }
 
-  }, [sessions, activeSessionId, settings]);
+  }, [sessions, activeSessionId, settings, metaInfo]);
 
   // === Context Compression (Auto Summary) Logic ===
-  useEffect(() => {
-      if (!isLoading && !isToolExecuting && activeSessionId) {
-         const msgs = sessions[activeSessionId]?.messages || [];
-         // Trigger if messages > 20 and not already compressing
-         if (msgs.length > 20 && !isCompressing) {
-             // Check if we already have a recent summary at index 1 to avoid loop? 
-             // Logic: Compress index 1 to 10 (10 msgs). Keep index 0 (Welcome).
-             // Only if index 1 is not already a system summary? Or just merge.
-             performCompression(activeSessionId, msgs);
-         }
-      }
-  }, [isLoading, isToolExecuting, activeSessionId]);
+  // Note: Disabled automatic compression in favor of manual modal as per user request, 
+  // but kept logic available for manual invocation.
+  
+  const performCompression = async (keepCount: number = 10) => {
+      if (!activeSessionId || !sessions[activeSessionId]) return;
+      
+      const currentMessages = sessions[activeSessionId].messages;
+      const totalLen = currentMessages.length;
+      
+      // Keep index 0 (Welcome). 
+      // Keep last `keepCount` messages.
+      // Summarize everything in betweeen.
+      // [0] ... [Summary Range] ... [Total - keepCount ... Total]
+      
+      // Check if we have enough messages to compress
+      if (totalLen <= keepCount + 1) return; 
 
-  const performCompression = async (sessionId: string, currentMessages: Message[]) => {
       setIsCompressing(true);
       try {
-          // Keep index 0 (Welcome). 
-          // Take next 10 messages (index 1 to 10 inclusive).
-          if (currentMessages.length <= 11) return; // Safety check
+          const startIndex = 1; // Skip welcome
+          const endIndex = totalLen - keepCount; // Exclusive
 
-          const toSummarize = currentMessages.slice(1, 11);
+          const toSummarize = currentMessages.slice(startIndex, endIndex);
           
+          if (toSummarize.length === 0) return;
+
           // Convert to OpenAI format
           const apiMsgs = toSummarize.map(m => {
              // We can treat system summary as system
@@ -472,14 +485,14 @@ export const AIChatbot: React.FC<Props> = ({
           const summaryText = await summarizeMessages(apiMsgs, settings);
           if (summaryText) {
               setSessions(prev => {
-                  const sess = { ...prev[sessionId] };
-                  // Remove the 10 messages
-                  const tail = sess.messages.slice(11);
+                  const sess = { ...prev[activeSessionId] };
+                  // Tail part
+                  const tail = sess.messages.slice(endIndex);
                   // Insert summary
                   const summaryMsg: Message = { role: 'system', text: summaryText };
                   // Result: [Welcome, Summary, ...Tail]
                   sess.messages = [sess.messages[0], summaryMsg, ...tail];
-                  return { ...prev, [sessionId]: sess };
+                  return { ...prev, [activeSessionId]: sess };
               });
               console.log("Chat history compressed successfully.");
           }
@@ -493,17 +506,11 @@ export const AIChatbot: React.FC<Props> = ({
   // === Scroll Logic Optimized (Disable Follow Output) ===
   useEffect(() => {
     const currentMsgs = activeSessionId ? sessions[activeSessionId]?.messages || [] : [];
-    
-    // Only scroll if:
-    // 1. Session ID changed (switched chat)
-    // 2. Message COUNT increased (new user msg or new AI start msg)
-    // We intentionally ignore content updates (streaming) to avoid following output
-    
     if (messageCountRef.current !== currentMsgs.length) {
         messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
         messageCountRef.current = currentMsgs.length;
     }
-  }, [sessions, activeSessionId]); // Note: dependency on sessions still needed to detect count change
+  }, [sessions, activeSessionId]); 
 
   useEffect(() => {
     if (textareaRef.current) {
@@ -529,6 +536,7 @@ export const AIChatbot: React.FC<Props> = ({
              id: newSession.id,
              title: newSession.title,
              messages: newSession.messages,
+             meta_info: metaInfo,
              created_at: newSession.createdAt
          }, settings);
     }
@@ -548,6 +556,7 @@ export const AIChatbot: React.FC<Props> = ({
           id: sess.id,
           title: sess.title,
           messages: sess.messages,
+          meta_info: metaInfo,
           created_at: sess.createdAt
       }, settings);
       
@@ -839,6 +848,15 @@ export const AIChatbot: React.FC<Props> = ({
                   } else if (tool.name === 'regenerate_report') {
                       onRegenerateReport?.(tool.args.instructions);
                       result = "Report regeneration triggered.";
+                  } else if (tool.name === 'update_meta_info') {
+                      // ** New Tool: Update Meta Info **
+                      const newInfo = tool.args.new_info;
+                      if (newInfo) {
+                          onUpdateMetaInfo(newInfo);
+                          result = "Meta info (patient record) updated successfully. The new context is now available.";
+                      } else {
+                          result = "Failed to update meta info: content was empty.";
+                      }
                   } else {
                       result = "Unknown tool.";
                   }
@@ -899,6 +917,15 @@ export const AIChatbot: React.FC<Props> = ({
          onClose={() => setShowMetaModal(false)}
          metaInfo={metaInfo}
          onSave={onUpdateMetaInfo}
+      />
+
+      <ChatMemoryModal 
+        isOpen={showMemoryModal}
+        onClose={() => setShowMemoryModal(false)}
+        tokenCount={tokenCount}
+        messageCount={activeMessages.length}
+        onCompress={performCompression}
+        isCompressing={isCompressing}
       />
       
       {/* Reference Modal (Report/Meta Viewer) */}
@@ -983,11 +1010,14 @@ export const AIChatbot: React.FC<Props> = ({
            </div>
            
            <div className="flex items-center gap-3">
-               {isCompressing && (
-                   <span className="text-xs text-indigo-500 animate-pulse flex items-center gap-1">
-                       <span>🗜️</span> 正在优化记忆...
-                   </span>
-               )}
+               <button 
+                   onClick={() => setShowMemoryModal(true)}
+                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 text-xs font-bold text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 transition-colors"
+                   title="整理上下文记忆"
+               >
+                   <span>🗜️</span> 记忆整理
+               </button>
+
                <button 
                  onClick={() => setShowMetaModal(true)}
                  className={`hidden md:flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-bold transition-colors ${metaInfo ? 'bg-amber-100 text-amber-800 border-amber-200 shadow-sm' : 'bg-white text-slate-500 border-slate-200 hover:bg-amber-50 hover:text-amber-600'}`}

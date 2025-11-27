@@ -1,4 +1,6 @@
 
+
+
 import React, { useState, useEffect } from 'react';
 
 interface Props {
@@ -49,7 +51,7 @@ export const MetaInfoModal: React.FC<Props> = ({ isOpen, onClose, metaInfo, onSa
                     <p className="mt-1 opacity-80">
                         在此输入患者的四诊信息（如脉象、舌苔）、主诉、既往病史、体质特征或季节环境等。
                         <br/>
-                        AI 在回答问题时，将<strong>强制引用</strong>此处的上下文，结合AI分析报告进行综合研讨。
+                        AI 在回答问题时，将<strong>强制引用</strong>此处的上下文。AI 也可以根据对话内容<strong>自动更新</strong>此信息。
                     </p>
                 </div>
             </div>
@@ -68,7 +70,7 @@ export const MetaInfoModal: React.FC<Props> = ({ isOpen, onClose, metaInfo, onSa
                 onClick={handleSave}
                 className="px-6 py-2 rounded-lg bg-amber-500 text-white font-bold hover:bg-amber-600 shadow-lg shadow-amber-200 transition transform active:scale-95"
             >
-                保存上下文
+                保存并同步
             </button>
         </div>
       </div>
