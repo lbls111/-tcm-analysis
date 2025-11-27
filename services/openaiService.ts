@@ -1,5 +1,4 @@
 
-
 import { AnalysisResult, AISettings, ModelOption, BenCaoHerb } from "../types";
 
 // ==========================================
@@ -158,12 +157,13 @@ const CHAT_SYSTEM_INSTRUCTION = (analysis: AnalysisResult, prescription: string,
    - 药材名请使用全称。
 
 **富文本增强**:
-- 本系统支持 HTML 渲染。你可以返回 Tailwind CSS 样式的卡片。
+- 本系统支持 HTML 渲染。你可以返回 Tailwind CSS 样式的卡片，每次回复都可以进行渲染。
 - 但对于药材链接，**不需要**你手动添加。前端会自动识别文本中的药材名并添加点击交互。你只需要自然地提到药名即可。
 
 **回答风格:**
-- 专业、客观、循证。
+- 专业、客观、循证。禁止盲从用户判断和思维，你拥有自己的中医思维，你会模仿并引用【相关名医思维】作为你的坚持，每一次的回复都要附带质疑自己是否运用名医思维，确保你回复具备名医姿态。质疑用户的提问，反思自己的质疑，反向论证是否客观，然后给出客观的回复。
 - 即使查不到数据，也要基于你的医学知识库给出建议，但需标注“(基于通用医学知识，数据库中暂未收录)”。
+- 始终保持HTML格式输出渲染。
 `;
 
 // ==========================================
@@ -406,7 +406,7 @@ export async function* analyzePrescriptionWithAI(
 };
 
 /**
- * Chat Stream Generation
+ * Chat Stream Generation with Context Management (Compression/Pruning)
  */
 export async function* generateChatStream(
     history: OpenAIMessage[],
@@ -418,12 +418,57 @@ export async function* generateChatStream(
 ): AsyncGenerator<{ text?: string, functionCalls?: {id: string, name: string, args: any}[] }, void, unknown> {
     const url = `${getBaseUrl(settings.apiBaseUrl)}/chat/completions`;
     
+    // 1. Build System Message
     const systemMsg: OpenAIMessage = {
         role: "system",
         content: CHAT_SYSTEM_INSTRUCTION(analysis, prescription, reportContent)
     };
 
-    const messages = [systemMsg, ...history];
+    // 2. Implement Token Context Management (Heuristic Compression)
+    // Threshold: ~50,000 characters (roughly 16k tokens, safe for most models including GPT-4o-mini)
+    const MAX_CONTEXT_CHARS = 50000;
+    
+    // Always keep system message and the very last user message to ensure continuity
+    const lastUserMsg = history[history.length - 1];
+    const previousHistory = history.slice(0, history.length - 1);
+    
+    let processedHistory: OpenAIMessage[] = [...previousHistory];
+    
+    // Calculate total length (rough approximation)
+    let currentLength = JSON.stringify(processedHistory).length + JSON.stringify(systemMsg).length + JSON.stringify(lastUserMsg).length;
+    
+    if (currentLength > MAX_CONTEXT_CHARS) {
+        console.warn(`Context length ${currentLength} exceeds limit ${MAX_CONTEXT_CHARS}. Pruning history...`);
+        
+        // Strategy: Keep recent N messages until we are safe.
+        // We iterate backwards and accumulate messages until we hit the limit.
+        const retainedMessages: OpenAIMessage[] = [];
+        let accumulatedLen = 0;
+        
+        // Reverse iterate
+        for (let i = previousHistory.length - 1; i >= 0; i--) {
+            const msgLen = JSON.stringify(previousHistory[i]).length;
+            if (accumulatedLen + msgLen < (MAX_CONTEXT_CHARS * 0.6)) { // Use 60% of budget for history
+                retainedMessages.unshift(previousHistory[i]);
+                accumulatedLen += msgLen;
+            } else {
+                break; // Stop adding older messages
+            }
+        }
+        
+        // Inject a system note indicating compression
+        if (retainedMessages.length < previousHistory.length) {
+            const compressionNote: OpenAIMessage = {
+                role: "system",
+                content: `[System Note: Context compressed. ${previousHistory.length - retainedMessages.length} older messages were removed to save memory. Focus on the recent conversation.]`
+            };
+            processedHistory = [compressionNote, ...retainedMessages];
+        } else {
+            processedHistory = retainedMessages;
+        }
+    }
+
+    const messages = [systemMsg, ...processedHistory, lastUserMsg];
 
     const payload = {
         model: settings.chatModel || "gpt-3.5-turbo",
