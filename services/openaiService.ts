@@ -136,6 +136,7 @@ const CHAT_SYSTEM_INSTRUCTION = (analysis: AnalysisResult, prescription: string,
 5. **药名处理**: 
    - **不要**手动给药名加 HTML 标签（如 <span...>）。
    - 直接输出纯文本药名（如“黄芪”、“白芍”），前端会自动识别并高亮它们。
+6. **代码块禁令**: 绝对不要在回答中包裹 \`\`\`html ... \`\`\`，直接返回标签。
 
 **强制引用规则 (Strict Citation Protocols):**
 在回答任何医学判断时，必须显式引用【AI分析报告】或【元信息】作为依据。
@@ -295,6 +296,39 @@ export const generateHerbDataWithAI = async (herbName: string, settings: AISetti
 };
 
 /**
+ * Summarize Chat History (Context Compression)
+ */
+export const summarizeMessages = async (messages: OpenAIMessage[], settings: AISettings): Promise<string> => {
+    if (!settings.apiKey) throw new Error("API Key is missing for summarization");
+
+    const systemPrompt = "你是一位专业的对话总结助手。请将以下对话历史压缩成一段精炼的“记忆摘要”。保留关键的医学判断、药方修改记录和重要结论。忽略无关的寒暄。摘要应以第三人称描述，例如“用户询问了...AI建议...”。";
+
+    try {
+        const url = `${getBaseUrl(settings.apiBaseUrl)}/chat/completions`;
+        const payload = {
+            model: settings.chatModel || "gpt-3.5-turbo",
+            messages: [{ role: "system", content: systemPrompt }, ...messages],
+            temperature: 0.3,
+            max_tokens: 500
+        };
+
+        const res = await fetch(url, {
+            method: "POST",
+            headers: getHeaders(settings.apiKey),
+            body: JSON.stringify(payload)
+        });
+
+        if (!res.ok) throw new Error("Summarization failed");
+        const data = await res.json();
+        const summary = data.choices?.[0]?.message?.content || "";
+        return `【历史对话摘要】：${summary}`;
+    } catch (e) {
+        console.error("Summarization error:", e);
+        return ""; // Fail gracefully
+    }
+};
+
+/**
  * Analyze Prescription (Streaming Generation)
  */
 export async function* analyzePrescriptionWithAI(
@@ -358,7 +392,7 @@ export async function* analyzePrescriptionWithAI(
 
     if (!res.ok) {
         const err = await res.text();
-        throw new Error(`AI Analysis Failed: ${err}`);
+        throw new Error(`AI Analysis Failed: ${res.status} ${res.statusText}`);
     }
 
     if (!res.body) return;
@@ -418,15 +452,22 @@ export async function* generateChatStream(
 ): AsyncGenerator<{ text?: string, functionCalls?: {id: string, name: string, args: any}[] }, void, unknown> {
     const url = `${getBaseUrl(settings.apiBaseUrl)}/chat/completions`;
     
+    // Safety Truncate Report Content to prevent context overflow before compression kicks in
+    // Limit report to ~15,000 characters
+    const MAX_REPORT_CHARS = 15000;
+    const safeReportContent = reportContent && reportContent.length > MAX_REPORT_CHARS 
+        ? reportContent.slice(0, MAX_REPORT_CHARS) + "\n\n[...System Note: Report truncated due to length limits...]"
+        : reportContent;
+
     // 1. Build System Message
     const systemMsg: OpenAIMessage = {
         role: "system",
-        content: CHAT_SYSTEM_INSTRUCTION(analysis, prescription, reportContent, metaInfo)
+        content: CHAT_SYSTEM_INSTRUCTION(analysis, prescription, safeReportContent, metaInfo)
     };
 
     // 2. Implement Token Context Management (Heuristic Compression)
-    // Threshold: ~50,000 characters (roughly 16k tokens, safe for most models including GPT-4o-mini)
-    const MAX_CONTEXT_CHARS = 50000;
+    // Threshold: ~300,000 characters (approx 120k tokens safe margin for high-end models)
+    const MAX_CONTEXT_CHARS = 300000; 
     
     // Always keep system message and the very last user message to ensure continuity
     const lastUserMsg = history[history.length - 1];
@@ -448,7 +489,7 @@ export async function* generateChatStream(
         // Reverse iterate
         for (let i = previousHistory.length - 1; i >= 0; i--) {
             const msgLen = JSON.stringify(previousHistory[i]).length;
-            if (accumulatedLen + msgLen < (MAX_CONTEXT_CHARS * 0.6)) { // Use 60% of budget for history
+            if (accumulatedLen + msgLen < (MAX_CONTEXT_CHARS * 0.7)) { // Use 70% of budget for history
                 retainedMessages.unshift(previousHistory[i]);
                 accumulatedLen += msgLen;
             } else {
@@ -460,7 +501,7 @@ export async function* generateChatStream(
         if (retainedMessages.length < previousHistory.length) {
             const compressionNote: OpenAIMessage = {
                 role: "system",
-                content: `[System Note: Context compressed. ${previousHistory.length - retainedMessages.length} older messages were removed to save memory. Focus on the recent conversation.]`
+                content: `[System Note: Context compressed. The earliest ${previousHistory.length - retainedMessages.length} messages were removed to save memory.]`
             };
             processedHistory = [compressionNote, ...retainedMessages];
         } else {
@@ -531,7 +572,7 @@ export async function* generateChatStream(
 
     if (!res.ok) {
         const err = await res.text();
-        throw new Error(`Chat Stream Failed: ${err}`);
+        throw new Error(`Chat Stream Failed: ${res.status} ${res.statusText}`);
     }
 
     if (!res.body) return;

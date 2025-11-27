@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { generateChatStream, OpenAIMessage, OpenAIToolCall } from '../services/openaiService';
+import { generateChatStream, OpenAIMessage, OpenAIToolCall, summarizeMessages } from '../services/openaiService';
 import { AnalysisResult, AISettings } from '../types';
 import { searchHerbsForAI, FULL_HERB_LIST } from '../data/herbDatabase';
 import { fetchCloudChatSessions, saveCloudChatSession, deleteCloudChatSession } from '../services/supabaseService';
@@ -10,7 +10,7 @@ import { MetaInfoModal } from './MetaInfoModal';
 // 1. Types
 // ==========================================
 interface Message {
-  role: 'user' | 'model' | 'tool';
+  role: 'user' | 'model' | 'tool' | 'system';
   text: string;
   isError?: boolean;
   // For Tool/Function logic
@@ -142,8 +142,8 @@ const ChatMessageItem: React.FC<MessageItemProps> = ({
           .replace(/\[\[AI报告\]\]/g, '<span class="citation-link cursor-pointer inline-flex items-center gap-1 mx-1 px-1.5 py-0.5 rounded text-xs font-bold bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100 transition-all select-none" data-citation="report">📑 AI报告</span>')
           .replace(/\[\[元信息\]\]/g, '<span class="citation-link cursor-pointer inline-flex items-center gap-1 mx-1 px-1.5 py-0.5 rounded text-xs font-bold bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 transition-all select-none" data-citation="meta">🧠 元信息</span>');
 
-      // --- Step 2: Herb Highlighting (Robust Regex) ---
-      // Only highlight if regex exists and we have plain text herbs
+      // --- Step 2: Herb Highlighting (Robust Regex on TEXT nodes only to avoid breaking HTML attributes) ---
+      // Simple Split strategy works well for well-formed tags
       if (herbRegex) {
           const parts = processed.split(/(<[^>]+>)/g);
           processed = parts.map(part => {
@@ -175,6 +175,17 @@ const ChatMessageItem: React.FC<MessageItemProps> = ({
   // Hide AI messages that ONLY contain tool calls
   if (message.role === 'model' && !message.text && message.toolCalls && message.toolCalls.length > 0) {
       return null;
+  }
+
+  // System Summary Message (Compressed History)
+  if (message.role === 'system') {
+      return (
+          <div className="flex justify-center my-6">
+              <div className="bg-slate-100 text-slate-500 text-xs px-4 py-2 rounded-full border border-slate-200 flex items-center gap-2">
+                  <span>🗜️</span> {message.text}
+              </div>
+          </div>
+      );
   }
 
   return (
@@ -295,6 +306,7 @@ export const AIChatbot: React.FC<Props> = ({
   const [showMetaModal, setShowMetaModal] = useState(false);
   const [viewingReference, setViewingReference] = useState<{type: 'report' | 'meta', content: string} | null>(null);
   const [tokenCount, setTokenCount] = useState<number>(0);
+  const [isCompressing, setIsCompressing] = useState(false);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -423,6 +435,60 @@ export const AIChatbot: React.FC<Props> = ({
     }
 
   }, [sessions, activeSessionId, settings]);
+
+  // === Context Compression (Auto Summary) Logic ===
+  useEffect(() => {
+      if (!isLoading && !isToolExecuting && activeSessionId) {
+         const msgs = sessions[activeSessionId]?.messages || [];
+         // Trigger if messages > 20 and not already compressing
+         if (msgs.length > 20 && !isCompressing) {
+             // Check if we already have a recent summary at index 1 to avoid loop? 
+             // Logic: Compress index 1 to 10 (10 msgs). Keep index 0 (Welcome).
+             // Only if index 1 is not already a system summary? Or just merge.
+             performCompression(activeSessionId, msgs);
+         }
+      }
+  }, [isLoading, isToolExecuting, activeSessionId]);
+
+  const performCompression = async (sessionId: string, currentMessages: Message[]) => {
+      setIsCompressing(true);
+      try {
+          // Keep index 0 (Welcome). 
+          // Take next 10 messages (index 1 to 10 inclusive).
+          if (currentMessages.length <= 11) return; // Safety check
+
+          const toSummarize = currentMessages.slice(1, 11);
+          
+          // Convert to OpenAI format
+          const apiMsgs = toSummarize.map(m => {
+             // We can treat system summary as system
+             if(m.role === 'system') return { role: 'system' as const, content: m.text };
+             // Tool/Model/User mapping
+             if(m.role === 'tool') return { role: 'tool' as const, content: m.text, tool_call_id: m.toolCallId };
+             if(m.role === 'model') return { role: 'assistant' as const, content: m.text, tool_calls: m.toolCalls };
+             return { role: 'user' as const, content: m.text };
+          });
+
+          const summaryText = await summarizeMessages(apiMsgs, settings);
+          if (summaryText) {
+              setSessions(prev => {
+                  const sess = { ...prev[sessionId] };
+                  // Remove the 10 messages
+                  const tail = sess.messages.slice(11);
+                  // Insert summary
+                  const summaryMsg: Message = { role: 'system', text: summaryText };
+                  // Result: [Welcome, Summary, ...Tail]
+                  sess.messages = [sess.messages[0], summaryMsg, ...tail];
+                  return { ...prev, [sessionId]: sess };
+              });
+              console.log("Chat history compressed successfully.");
+          }
+      } catch (e) {
+          console.error("Compression failed", e);
+      } finally {
+          setIsCompressing(false);
+      }
+  };
 
   // === Scroll Logic Optimized (Disable Follow Output) ===
   useEffect(() => {
@@ -578,9 +644,6 @@ export const AIChatbot: React.FC<Props> = ({
       }
       
       // 3. Cascade Forward: (Optional) If we delete a Tool Call, delete the Tool Result?
-      // Generally user deletes visible messages, which are mostly Text.
-      // But if user deletes a visible message that had tool_calls attached (rare but possible if text exists),
-      // we should delete the subsequent 'tool' result.
       curr = index + 1;
       while (curr < sess.messages.length) {
           const m = sess.messages[curr];
@@ -693,7 +756,7 @@ export const AIChatbot: React.FC<Props> = ({
               };
           } else {
               return {
-                  role: m.role,
+                  role: m.role as 'user' | 'system',
                   content: m.text
               };
           }
@@ -807,11 +870,12 @@ export const AIChatbot: React.FC<Props> = ({
               console.log('Generation aborted.');
           } else {
               console.error('Generation failed:', e);
+              const errorMsg = e instanceof Error ? e.message : String(e);
               setSessions(prev => {
                   const sess = { ...prev[sessionId] };
                   const lastIdx = sess.messages.length - 1;
                   const currentText = sess.messages[lastIdx].text;
-                  const errorText = `\n\n[系统错误: ${JSON.stringify(e)}]`;
+                  const errorText = `\n\n[系统错误: ${errorMsg}]`;
                   sess.messages[lastIdx] = { 
                       ...sess.messages[lastIdx], 
                       text: currentText + errorText,
@@ -919,6 +983,11 @@ export const AIChatbot: React.FC<Props> = ({
            </div>
            
            <div className="flex items-center gap-3">
+               {isCompressing && (
+                   <span className="text-xs text-indigo-500 animate-pulse flex items-center gap-1">
+                       <span>🗜️</span> 正在优化记忆...
+                   </span>
+               )}
                <button 
                  onClick={() => setShowMetaModal(true)}
                  className={`hidden md:flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-bold transition-colors ${metaInfo ? 'bg-amber-100 text-amber-800 border-amber-200 shadow-sm' : 'bg-white text-slate-500 border-slate-200 hover:bg-amber-50 hover:text-amber-600'}`}
@@ -999,9 +1068,9 @@ export const AIChatbot: React.FC<Props> = ({
                   rows={1}
                 />
                 <div className="absolute right-3 bottom-3 flex items-center gap-3 pointer-events-none">
-                     <div className="text-[10px] text-slate-400 font-medium bg-white/50 px-2 rounded flex items-center gap-1">
+                     <div className={`text-[10px] font-medium bg-white/50 px-2 rounded flex items-center gap-1 ${tokenCount > 100000 ? 'text-red-500 font-bold' : 'text-slate-400'}`}>
                         <span>💬</span> 
-                        {tokenCount > 0 ? `上下文: ~${tokenCount} tokens` : 'HTML 支持'}
+                        {tokenCount > 0 ? `上下文: ~${tokenCount} tokens ${tokenCount > 100000 ? '(已超载，建议清理)' : ''}` : 'HTML 支持'}
                      </div>
                 </div>
               </div>
