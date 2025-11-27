@@ -1,21 +1,60 @@
 
-
-import React, { useState } from 'react';
+import React, { useMemo } from 'react';
 import { BenCaoHerb } from '../types';
+import { FULL_HERB_LIST } from '../data/herbDatabase';
+import { COMMON_PAIRS } from '../utils/tcmMath';
 
 interface HerbDetailModalProps {
   herb: BenCaoHerb;
   onClose: () => void;
   onEdit?: (herb: BenCaoHerb) => void;
+  onSwitch?: (herbName: string) => void;
 }
 
-export const HerbDetailModal: React.FC<HerbDetailModalProps> = ({ herb, onClose, onEdit }) => {
+export const HerbDetailModal: React.FC<HerbDetailModalProps> = ({ herb, onClose, onEdit, onSwitch }) => {
 
   const getNatureColor = (nature: string) => {
     if (nature.includes('大热') || nature.includes('热') || nature.includes('温')) return 'text-red-600 bg-red-50 border-red-200';
     if (nature.includes('大寒') || nature.includes('寒') || nature.includes('凉')) return 'text-cyan-600 bg-cyan-50 border-cyan-200';
     return 'text-emerald-600 bg-emerald-50 border-emerald-200';
   };
+
+  const relations = useMemo(() => {
+      // 1. Variants (Name inclusion)
+      const variants = FULL_HERB_LIST.filter(h => 
+          h.name !== herb.name && 
+          (h.name.includes(herb.name) || (herb.name.length > 1 && herb.name.includes(h.name)))
+      ).slice(0, 5);
+
+      // 2. Pairs (From Common Pairs)
+      const pairs = COMMON_PAIRS
+          .filter(p => p.names.includes(herb.name))
+          .map(p => {
+              const partnerName = p.names.find(n => n !== herb.name) || '';
+              return { partner: partnerName, label: p.label, effect: p.effect };
+          });
+
+      // 3. Similar (Scoring)
+      const similar = FULL_HERB_LIST
+          .filter(h => h.name !== herb.name && !variants.includes(h))
+          .map(h => {
+              let score = 0;
+              // Same nature (fuzzy)
+              if (h.nature[h.nature.length-1] === herb.nature[herb.nature.length-1]) score += 2;
+              // Shared flavors
+              const sharedFlavors = h.flavors.filter(f => herb.flavors.includes(f));
+              score += sharedFlavors.length;
+              // Shared meridians
+              const sharedMeridians = h.meridians.filter(m => herb.meridians.includes(m));
+              score += sharedMeridians.length;
+              return { herb: h, score };
+          })
+          .sort((a, b) => b.score - a.score)
+          .slice(0, 6)
+          .map(item => item.herb);
+
+      return { variants, pairs, similar };
+  }, [herb]);
 
   return (
     <div className="fixed inset-0 z-[100] bg-stone-900/40 backdrop-blur-md flex items-center justify-center p-4 md:p-8" onClick={onClose}>
@@ -24,14 +63,14 @@ export const HerbDetailModal: React.FC<HerbDetailModalProps> = ({ herb, onClose,
         onClick={e => e.stopPropagation()}
       >
          {/* Modal Header */}
-         <div className="bg-stone-900 text-amber-50 p-8 flex justify-between items-start relative overflow-hidden">
+         <div className="bg-stone-900 text-amber-50 p-8 flex justify-between items-start relative overflow-hidden shrink-0">
             <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/black-scales.png')] opacity-30"></div>
             <div className="relative z-10 flex-1">
               <div className="flex items-center gap-3 mb-3">
                  <span className="bg-amber-900/80 text-amber-100 text-xs px-2 py-1 rounded border border-amber-800 font-bold tracking-wider">{herb.category || '药材'}</span>
                  {herb.processing && herb.processing !== '生用' && <span className="bg-rose-900 text-rose-100 text-xs px-2 py-1 rounded border border-rose-800 font-bold">炮制: {herb.processing}</span>}
                  {herb.parentHerb && <span className="bg-stone-700 text-stone-200 text-xs px-2 py-1 rounded border border-stone-600">基原: {herb.parentHerb}</span>}
-                 <span className="text-stone-500 font-mono text-xs uppercase tracking-widest">NO. {herb.id}</span>
+                 <span className="text-stone-500 font-mono text-xs uppercase tracking-widest">NO. {herb.id.slice(0,8)}</span>
               </div>
               <h2 className="text-5xl font-black font-serif-sc tracking-wide text-amber-50 drop-shadow-sm">{herb.name}</h2>
             </div>
@@ -111,6 +150,72 @@ export const HerbDetailModal: React.FC<HerbDetailModalProps> = ({ herb, onClose,
                     </div>
                 </div>
               </div>
+            )}
+
+            {/* Related Herbs Section */}
+            {(relations.variants.length > 0 || relations.pairs.length > 0 || relations.similar.length > 0) && (
+                <div className="pt-8 border-t border-stone-200">
+                    <h3 className="text-stone-800 font-bold text-lg mb-6 flex items-center gap-2">
+                        <span className="text-xl">🔗</span> 关联药材
+                    </h3>
+                    
+                    <div className="space-y-6">
+                        {/* 1. Variants/Processed */}
+                        {relations.variants.length > 0 && (
+                            <div>
+                                <span className="text-xs font-bold text-stone-400 uppercase tracking-wider block mb-2">同源 / 炮制</span>
+                                <div className="flex flex-wrap gap-2">
+                                    {relations.variants.map(h => (
+                                        <button 
+                                            key={h.id}
+                                            onClick={() => onSwitch && onSwitch(h.name)}
+                                            className="px-3 py-1.5 bg-amber-50 hover:bg-amber-100 text-amber-800 rounded-lg border border-amber-200 text-sm font-bold transition-colors"
+                                        >
+                                            {h.name}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        {/* 2. Pairs */}
+                        {relations.pairs.length > 0 && (
+                            <div>
+                                <span className="text-xs font-bold text-stone-400 uppercase tracking-wider block mb-2">经典药对</span>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                    {relations.pairs.map(p => (
+                                        <div key={p.partner} className="flex items-center gap-3 p-3 bg-indigo-50 border border-indigo-100 rounded-xl hover:border-indigo-300 transition-all cursor-pointer" onClick={() => onSwitch && onSwitch(p.partner)}>
+                                            <span className="text-2xl">🤝</span>
+                                            <div>
+                                                <div className="font-bold text-indigo-900 text-sm">{p.label} (配{p.partner})</div>
+                                                <div className="text-xs text-indigo-600/80">{p.effect}</div>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        {/* 3. Similar */}
+                        {relations.similar.length > 0 && (
+                            <div>
+                                <span className="text-xs font-bold text-stone-400 uppercase tracking-wider block mb-2">性味相近 / 可替换</span>
+                                <div className="flex flex-wrap gap-2">
+                                    {relations.similar.map(h => (
+                                        <button 
+                                            key={h.id}
+                                            onClick={() => onSwitch && onSwitch(h.name)}
+                                            className="px-3 py-1.5 bg-white hover:bg-stone-50 text-stone-600 rounded-lg border border-stone-200 hover:border-stone-300 text-sm transition-colors flex items-center gap-2"
+                                        >
+                                            <span>{h.name}</span>
+                                            <span className={`w-2 h-2 rounded-full ${getNatureColor(h.nature).split(' ')[1]}`}></span>
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                </div>
             )}
          </div>
       </div>

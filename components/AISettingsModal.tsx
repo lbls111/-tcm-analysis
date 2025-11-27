@@ -1,6 +1,4 @@
 
-
-
 import React, { useState } from 'react';
 import { AISettings } from '../types';
 import { fetchAvailableModels, testModelConnection, DEFAULT_ANALYZE_SYSTEM_INSTRUCTION } from '../services/openaiService';
@@ -78,9 +76,8 @@ export const AISettingsModal: React.FC<Props> = ({ isOpen, onClose, settings, on
             setLocalSettings(prev => ({
                 ...prev,
                 availableModels: models,
-                // If current selection is empty or not in list, maybe auto-select first one?
-                analysisModel: prev.analysisModel || models[0].id,
-                chatModel: prev.chatModel || models[0].id
+                // Auto-select first if empty
+                model: prev.model || models[0].id
             }));
             alert(`成功获取 ${models.length} 个模型！`);
         } else {
@@ -134,7 +131,7 @@ create table if not exists reports (
   created_at timestamp with time zone default timezone('utc'::text, now())
 );
 
--- 3. 聊天会话表 (chat_sessions)
+-- 3. 聊天会话表 (chat_sessions) - 修复 meta_info 缺失问题
 create table if not exists chat_sessions (
   id text primary key,
   title text,
@@ -142,6 +139,9 @@ create table if not exists chat_sessions (
   meta_info text, -- 元信息(病历)
   created_at bigint
 );
+
+-- 🚨 修复补丁: 如果遇到 "Could not find meta_info column" 错误，请务必运行下面这行:
+alter table chat_sessions add column if not exists meta_info text;
 
 -- 4. 开启所有表的公开读写权限 (仅限 Demo/单用户模式)
 alter table herbs enable row level security;
@@ -152,7 +152,7 @@ create policy "Public access herbs" on herbs for all using (true) with check (tr
 create policy "Public access reports" on reports for all using (true) with check (true);
 create policy "Public access chats" on chat_sessions for all using (true) with check (true);`;
       navigator.clipboard.writeText(sql);
-      alert("全量初始化 SQL 已复制！请前往 Supabase Dashboard -> SQL Editor 粘贴运行。");
+      alert("全量初始化 SQL 已复制！请前往 Supabase Dashboard -> SQL Editor 粘贴运行。\n\n重要：请检查包含了 'alter table chat_sessions add column...' 语句。");
   };
   
   const isUsingDefaultCloud = localSettings.supabaseUrl === DEFAULT_SUPABASE_URL;
@@ -261,10 +261,10 @@ create policy "Public access chats" on chat_sessions for all using (true) with c
                     </div>
                 </div>
 
-                {/* 2. Model Selection */}
+                {/* 2. Model Selection (Unified) */}
                 <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm space-y-5">
                     <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
-                        <span className="w-2 h-6 bg-indigo-500 rounded-full"></span> 模型指派 (Model Assignment)
+                        <span className="w-2 h-6 bg-indigo-500 rounded-full"></span> 模型指派 (Primary Model)
                     </h3>
                     
                     {localSettings.availableModels.length === 0 && (
@@ -273,58 +273,30 @@ create policy "Public access chats" on chat_sessions for all using (true) with c
                         </div>
                     )}
 
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                        {/* Analysis Model */}
-                        <div className="space-y-2">
-                            <label className="text-sm font-bold text-slate-700 flex justify-between">
-                                <span>AI 深度推演模型</span>
-                            </label>
-                            {localSettings.availableModels.length > 0 ? (
-                                <select 
-                                value={localSettings.analysisModel}
-                                onChange={e => setLocalSettings({...localSettings, analysisModel: e.target.value})}
-                                className="w-full p-3 rounded-xl border border-slate-200 bg-white text-sm outline-none"
-                                >
-                                    {localSettings.availableModels.map(m => (
-                                        <option key={m.id} value={m.id}>{m.name || m.id}</option>
-                                    ))}
-                                </select>
-                            ) : (
-                                <input 
-                                type="text" 
-                                value={localSettings.analysisModel}
-                                onChange={e => setLocalSettings({...localSettings, analysisModel: e.target.value})}
-                                placeholder="手动输入 ID (如 gpt-4)"
-                                className="w-full p-3 rounded-xl border border-slate-200 bg-slate-50 text-sm"
-                                />
-                            )}
-                        </div>
-
-                        {/* Chat Model */}
-                        <div className="space-y-2">
-                            <label className="text-sm font-bold text-slate-700 flex justify-between">
-                                <span>AI 问答助手模型</span>
-                            </label>
-                            {localSettings.availableModels.length > 0 ? (
-                                <select 
-                                value={localSettings.chatModel}
-                                onChange={e => setLocalSettings({...localSettings, chatModel: e.target.value})}
-                                className="w-full p-3 rounded-xl border border-slate-200 bg-white text-sm outline-none"
-                                >
-                                    {localSettings.availableModels.map(m => (
-                                        <option key={m.id} value={m.id}>{m.name || m.id}</option>
-                                    ))}
-                                </select>
-                            ) : (
-                                <input 
-                                type="text" 
-                                value={localSettings.chatModel}
-                                onChange={e => setLocalSettings({...localSettings, chatModel: e.target.value})}
-                                placeholder="手动输入 ID (如 gpt-3.5-turbo)"
-                                className="w-full p-3 rounded-xl border border-slate-200 bg-slate-50 text-sm"
-                                />
-                            )}
-                        </div>
+                    <div className="space-y-2">
+                        <label className="text-sm font-bold text-slate-700 flex justify-between">
+                            <span>主模型 (用于推演分析与对话)</span>
+                        </label>
+                        {localSettings.availableModels.length > 0 ? (
+                            <select 
+                            value={localSettings.model}
+                            onChange={e => setLocalSettings({...localSettings, model: e.target.value})}
+                            className="w-full p-3 rounded-xl border border-slate-200 bg-white text-sm outline-none"
+                            >
+                                {localSettings.availableModels.map(m => (
+                                    <option key={m.id} value={m.id}>{m.name || m.id}</option>
+                                ))}
+                            </select>
+                        ) : (
+                            <input 
+                            type="text" 
+                            value={localSettings.model}
+                            onChange={e => setLocalSettings({...localSettings, model: e.target.value})}
+                            placeholder="手动输入 ID (如 gpt-4)"
+                            className="w-full p-3 rounded-xl border border-slate-200 bg-slate-50 text-sm"
+                            />
+                        )}
+                        <p className="text-xs text-slate-400">此模型将统一应用于【深度分析报告】生成与【AI 问答助手】。</p>
                     </div>
                 </div>
 
@@ -434,15 +406,16 @@ create policy "Public access chats" on chat_sessions for all using (true) with c
                             {showSqlGuide ? '收起 SQL' : '查看初始化 SQL'}
                         </button>
                      </div>
-                    <p className="text-sm text-slate-500">
-                        如果您的云端无法保存聊天记录或报告，可能是因为数据表尚未创建。请点击右侧按钮获取初始化代码。
-                    </p>
+                    <div className="text-sm text-slate-500 space-y-2">
+                        <p>如果您的云端无法保存聊天记录或报告，或者遇到 <code className="bg-red-50 text-red-600 px-1 rounded">Could not find meta_info column</code> 错误，请点击右侧按钮获取最新初始化代码。</p>
+                        <p className="text-xs text-amber-600">注意：必须包含 <strong>ALTER TABLE ...</strong> 语句。</p>
+                    </div>
 
                     {showSqlGuide && (
                         <div className="bg-slate-900 rounded-xl overflow-hidden mt-4 relative group">
                             <div className="bg-slate-800 px-4 py-2 text-xs text-slate-400 font-bold uppercase border-b border-slate-700 flex justify-between items-center">
                                 <span>SQL Editor Input</span>
-                                <span className="text-[10px] text-emerald-400">All Tables (Herbs, Reports, Chats)</span>
+                                <span className="text-[10px] text-emerald-400">All Tables + Fixes</span>
                             </div>
                             <pre className="p-4 text-xs text-emerald-400 font-mono overflow-x-auto custom-scrollbar max-h-60">
 {`-- 1. 药材表 (herbs)
@@ -478,6 +451,9 @@ create table if not exists chat_sessions (
   meta_info text, -- 元信息(病历)
   created_at bigint
 );
+
+-- 🚨 修复补丁: 如果遇到 "Could not find meta_info column" 错误，请务必运行下面这行:
+alter table chat_sessions add column if not exists meta_info text;
 
 -- 4. 开启所有表的公开读写权限 (RLS)
 alter table herbs enable row level security;

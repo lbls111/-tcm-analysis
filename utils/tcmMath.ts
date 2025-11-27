@@ -19,7 +19,7 @@ const getTemperatureLabelFromValue = (hv: number): string => {
   return '大寒';
 };
 
-const COMMON_PAIRS: { names: string[], label: string, effect: string, description: string }[] = [
+export const COMMON_PAIRS: { names: string[], label: string, effect: string, description: string }[] = [
   { 
     names: ['麻黄', '桂枝'], 
     label: '麻桂配', 

@@ -1,17 +1,16 @@
 
-
-
 import React, { useState, useEffect } from 'react';
 
 interface Props {
   isOpen: boolean;
   onClose: () => void;
   metaInfo: string;
-  onSave: (info: string) => void;
+  onSave: (info: string) => Promise<void> | void;
 }
 
 export const MetaInfoModal: React.FC<Props> = ({ isOpen, onClose, metaInfo, onSave }) => {
   const [localInfo, setLocalInfo] = useState(metaInfo);
+  const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
     setLocalInfo(metaInfo);
@@ -19,9 +18,16 @@ export const MetaInfoModal: React.FC<Props> = ({ isOpen, onClose, metaInfo, onSa
 
   if (!isOpen) return null;
 
-  const handleSave = () => {
-    onSave(localInfo);
-    onClose();
+  const handleSave = async () => {
+    setIsSaving(true);
+    try {
+        await onSave(localInfo);
+        onClose();
+    } catch (e) {
+        console.error("Failed to save meta info", e);
+    } finally {
+        setIsSaving(false);
+    }
   };
 
   return (
@@ -68,9 +74,11 @@ export const MetaInfoModal: React.FC<Props> = ({ isOpen, onClose, metaInfo, onSa
             <button onClick={onClose} className="px-5 py-2 rounded-lg text-slate-500 font-bold hover:bg-slate-100 transition">取消</button>
             <button 
                 onClick={handleSave}
-                className="px-6 py-2 rounded-lg bg-amber-500 text-white font-bold hover:bg-amber-600 shadow-lg shadow-amber-200 transition transform active:scale-95"
+                disabled={isSaving}
+                className="px-6 py-2 rounded-lg bg-amber-500 text-white font-bold hover:bg-amber-600 shadow-lg shadow-amber-200 transition transform active:scale-95 flex items-center gap-2 disabled:bg-amber-300 disabled:cursor-not-allowed"
             >
-                保存并同步
+                {isSaving ? <span className="animate-spin">⏳</span> : <span>💾</span>}
+                {isSaving ? '同步中...' : '保存并同步'}
             </button>
         </div>
       </div>

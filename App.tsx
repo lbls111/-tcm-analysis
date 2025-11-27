@@ -7,18 +7,23 @@ import { AnalysisResult, ViewMode, Constitution, AdministrationMode, BenCaoHerb,
 import { QiFlowVisualizer } from './components/QiFlowVisualizer';
 import BenCaoDatabase from './components/BenCaoDatabase';
 import { HerbDetailModal } from './components/HerbDetailModal';
+import { EditHerbModal } from './components/EditHerbModal';
 import { AIChatbot } from './components/AIChatbot';
 import { AISettingsModal } from './components/AISettingsModal';
-import { FULL_HERB_LIST, registerDynamicHerb } from './data/herbDatabase';
+import { FULL_HERB_LIST, registerDynamicHerb, loadCustomHerbs } from './data/herbDatabase';
 import { DEFAULT_SUPABASE_URL, DEFAULT_SUPABASE_KEY } from './constants';
-import { saveCloudReport, fetchCloudReports } from './services/supabaseService';
+import { saveCloudReport, fetchCloudReports, deleteCloudReport, updateCloudHerb } from './services/supabaseService';
+
+// Logging Imports
+import { LogProvider, useLog } from './contexts/LogContext';
+import { LogViewer } from './components/LogViewer';
 
 const PRESET_PRESCRIPTION = "";
 const LS_REPORTS_KEY = "logicmaster_reports";
 const LS_REPORTS_META_KEY = "logicmaster_reports_meta";
 const LS_SETTINGS_KEY = "logicmaster_settings";
 const LS_AI_SETTINGS_KEY = "logicmaster_ai_settings";
-const LS_META_INFO_KEY = "logicmaster_meta_info"; // New Key
+const LS_META_INFO_KEY = "logicmaster_meta_info"; 
 const DEFAULT_API_URL = "https://lbls888-lap.hf.space/v1";
 
 type ReportMode = 'quick' | 'deep';
@@ -36,21 +41,31 @@ const sortVersions = (versions: string[]) => {
   });
 };
 
-function App() {
+const NAV_ITEMS = [
+  { id: ViewMode.WORKSHOP, label: '计算工坊', icon: '🧮' },
+  { id: ViewMode.VISUAL, label: '三焦动力', icon: '☯️' },
+  { id: ViewMode.REPORT, label: 'AI 推演', icon: '📝' },
+  { id: ViewMode.AI_CHAT, label: 'AI 问答', icon: '🤖' },
+  { id: ViewMode.DATABASE, label: '药典库', icon: '📚' }
+];
+
+// --- Main App Component ---
+function LogicMasterApp() {
+  const { addLog } = useLog(); // Use the log hook
+  const [showLogViewer, setShowLogViewer] = useState(false);
+
   const [view, setView] = useState<ViewMode>(ViewMode.INPUT);
   const [input, setInput] = useState(PRESET_PRESCRIPTION);
-  const [metaInfo, setMetaInfo] = useState(''); // New State for Meta Info
+  const [metaInfo, setMetaInfo] = useState(''); 
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
   const [autoFillingHerb, setAutoFillingHerb] = useState<string | null>(null);
   
-  // Local Reports (Active Session)
   const [reports, setReports] = useState<Record<string, string>>({});
   const [reportMeta, setReportMeta] = useState<Record<string, ReportMeta>>({});
   const [activeReportVersion, setActiveReportVersion] = useState<string>('V1');
   const [isReportIncomplete, setIsReportIncomplete] = useState(false);
   
-  // Cloud Reports (Archives)
   const [cloudReports, setCloudReports] = useState<CloudReport[]>([]);
   const [showReportHistory, setShowReportHistory] = useState(false);
   const [isSavingCloud, setIsSavingCloud] = useState(false);
@@ -63,8 +78,9 @@ function App() {
   const [aiSettings, setAiSettings] = useState<AISettings>({
     apiKey: '',
     apiBaseUrl: DEFAULT_API_URL,
-    analysisModel: '', // Empty by default
-    chatModel: '', // Empty by default
+    model: '', 
+    analysisModel: '', 
+    chatModel: '', 
     availableModels: [],
     systemInstruction: DEFAULT_ANALYZE_SYSTEM_INSTRUCTION,
     temperature: 0,
@@ -80,11 +96,13 @@ function App() {
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
   const [initialDosageRef, setInitialDosageRef] = useState<number | null>(null);
   const [viewingHerb, setViewingHerb] = useState<BenCaoHerb | null>(null);
+  const [editingHerb, setEditingHerb] = useState<BenCaoHerb | null>(null);
+  const [isSavingHerb, setIsSavingHerb] = useState(false);
   
-  // Abort Controller for stopping AI generation
   const abortControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
+    addLog('info', 'System', 'Application initialized');
     const savedReports = localStorage.getItem(LS_REPORTS_KEY);
     const savedMeta = localStorage.getItem(LS_REPORTS_META_KEY);
     
@@ -124,6 +142,7 @@ function App() {
         setAiSettings({
           apiKey: parsed.apiKey || '',
           apiBaseUrl: parsed.apiBaseUrl || DEFAULT_API_URL,
+          model: parsed.model || parsed.analysisModel || '',
           analysisModel: parsed.analysisModel || '',
           chatModel: parsed.chatModel || '',
           availableModels: parsed.availableModels || [],
@@ -167,7 +186,8 @@ function App() {
   useEffect(() => {
     if (view === ViewMode.REPORT && reports[activeReportVersion]) {
         const currentReport = reports[activeReportVersion];
-        const isComplete = currentReport.trim().endsWith('</html>');
+        // Use includes instead of endsWith for robustness against markdown/whitespace
+        const isComplete = currentReport.includes('</html>');
         setIsReportIncomplete(!isComplete);
     } else {
         setIsReportIncomplete(false);
@@ -178,6 +198,7 @@ function App() {
   useEffect(() => {
       const loadHistory = async () => {
           if (aiSettings.supabaseKey) {
+             addLog('info', 'Cloud', 'Fetching report history');
              const history = await fetchCloudReports(aiSettings);
              setCloudReports(history);
           }
@@ -185,7 +206,7 @@ function App() {
       if (view === ViewMode.REPORT) {
           loadHistory();
       }
-  }, [view, aiSettings.supabaseKey]); // Refresh when view changes or key changes
+  }, [view, aiSettings.supabaseKey]);
 
   // =========================================================
   // Herb Recognition Logic for Report (Memoized)
@@ -221,12 +242,15 @@ function App() {
 
   const handleStartCalculation = () => {
     try {
+      addLog('info', 'Calc', 'Starting prescription calculation', { input: input.substring(0, 50) });
       const herbs = parsePrescription(input);
       const result = calculatePrescription(herbs);
       setAnalysis(result);
       setInitialDosageRef(result.initialTotalDosage); 
       setView(ViewMode.WORKSHOP);
-    } catch (e) {
+      addLog('success', 'Calc', 'Calculation successful', { totalPTI: result.totalPTI, herbsCount: herbs.length });
+    } catch (e: any) {
+      addLog('error', 'Calc', 'Calculation failed', { error: e.message });
       console.error(e);
       alert("计算出错，请检查输入格式");
     }
@@ -237,6 +261,7 @@ function App() {
           abortControllerRef.current.abort();
           abortControllerRef.current = null;
           setAiLoading(false);
+          addLog('warning', 'AI', 'Generation aborted by user');
           setReports(prev => {
               const current = prev[activeReportVersion] || '';
               return { ...prev, [activeReportVersion]: current + "\n\n<!-- 生成已由用户手动停止 -->" };
@@ -248,15 +273,15 @@ function App() {
       if (!activeReportVersion) return;
       if (!window.confirm("确定要重置当前版本吗？\n当前内容将被清空，您可以重新选择【深度推演】或【快速审核】模式。")) return;
       
+      addLog('info', 'Report', `Reset version ${activeReportVersion}`);
       setReports(prev => ({
           ...prev,
-          [activeReportVersion]: '' // Set to empty string to trigger Selection UI
+          [activeReportVersion]: '' 
       }));
       setIsReportIncomplete(false);
       setAiError(null);
   };
   
-  // Save Report to Cloud Helper
   const saveCurrentReportToCloud = async (version: string, htmlContent: string, mode: string, isManual: boolean = false) => {
       if (!aiSettings.supabaseKey || !analysis) {
           if (isManual) alert("保存失败：未配置云数据库或缺少分析数据。");
@@ -265,24 +290,25 @@ function App() {
       
       if (isManual) setIsSavingCloud(true);
       
-      console.log(`[Cloud] Uploading report version ${version}...`);
+      addLog('info', 'Cloud', `Uploading report version ${version}`, { mode, isManual });
       const success = await saveCloudReport({
           prescription: input,
           content: htmlContent,
-          meta: { version, mode, model: aiSettings.analysisModel },
+          meta: { version, mode, model: aiSettings.model || aiSettings.analysisModel },
           analysis_result: { top3: analysis.top3, totalPTI: analysis.totalPTI }
       }, aiSettings);
       
       if (isManual) {
           setIsSavingCloud(false);
           if (success) {
+              addLog('success', 'Cloud', 'Report saved successfully');
               alert("☁️ 报告已成功保存至云端！\n您可以在“历史存档”中随时查看。");
           } else {
+              addLog('error', 'Cloud', 'Report save failed');
               alert("❌ 保存失败。\n请检查 Supabase 连接，或确认是否已运行数据库初始化 SQL (需包含 'reports' 表)。");
           }
       }
       
-      // Refresh list quietly
       if (success) {
           fetchCloudReports(aiSettings).then(setCloudReports);
       }
@@ -295,7 +321,21 @@ function App() {
       saveCurrentReportToCloud(activeReportVersion, content, meta.mode, true);
   };
 
-  // Updated handleAskAI to support Quick/Deep modes with correct versioning logic
+  const handleDeleteCloudReport = async (id: string, e: React.MouseEvent) => {
+      e.stopPropagation();
+      if (!window.confirm("确定要删除此云端存档吗？此操作无法撤销。")) return;
+      
+      addLog('action', 'Cloud', 'Deleting cloud report', { id });
+      const success = await deleteCloudReport(id, aiSettings);
+      if (success) {
+          addLog('success', 'Cloud', 'Cloud report deleted');
+          setCloudReports(prev => prev.filter(r => r.id !== id));
+      } else {
+          addLog('error', 'Cloud', 'Failed to delete cloud report');
+          alert("删除失败，请检查网络或权限。");
+      }
+  };
+
   const handleAskAI = async (mode: 'deep' | 'quick' | 'regenerate', regenerateInstructions?: string) => {
     if (!analysis) return;
 
@@ -308,36 +348,31 @@ function App() {
     setView(ViewMode.REPORT);
     setAiLoading(true);
     setAiError(null);
+    addLog('info', 'AI', `Starting AI generation mode: ${mode}`);
 
     const controller = new AbortController();
     abortControllerRef.current = controller;
 
-    // Determine Version and System Prompt
     let versionToUse = activeReportVersion;
     let targetMode: ReportMode = 'deep';
     let sysPrompt = DEFAULT_ANALYZE_SYSTEM_INSTRUCTION;
 
-    // Smart Reuse Logic: If current version exists but is empty/reset, reuse it.
     const isCurrentVersionEmpty = activeReportVersion && (!reports[activeReportVersion] || reports[activeReportVersion].trim() === '');
 
     if (mode === 'regenerate') {
-        // Regenerate Mode (Usually called by Chatbot Tool): Reuse current version slot
         versionToUse = activeReportVersion;
         targetMode = reportMeta[versionToUse]?.mode || 'deep';
         
         if (targetMode === 'quick') {
             sysPrompt = QUICK_ANALYZE_SYSTEM_INSTRUCTION;
         }
-        // Clear content before start
         setReports(prev => ({ ...prev, [versionToUse]: '' }));
 
     } else {
-        // Mode Selection (Deep / Quick)
         if (isCurrentVersionEmpty) {
-            // Reuse the existing empty slot
             versionToUse = activeReportVersion;
         } else {
-            // Create NEW version (V + maxIndex + 1)
+            // Version Management: Calculate next version if not empty
             const existingVersions = Object.keys(reports);
             const maxVer = existingVersions.reduce((max, key) => {
                const num = parseInt(key.replace(/^V/, '')) || 0;
@@ -355,7 +390,6 @@ function App() {
         setReports(prev => ({ ...prev, [versionToUse]: '' }));
     }
 
-    // Update Meta
     setReportMeta(prev => ({
         ...prev,
         [versionToUse]: { mode: targetMode, timestamp: Date.now() }
@@ -369,8 +403,8 @@ function App() {
         regenerateInstructions,
         undefined,
         controller.signal,
-        sysPrompt, // Pass specific prompt
-        metaInfo // Pass meta info to AI
+        sysPrompt, 
+        metaInfo 
       );
 
       let htmlContent = '';
@@ -379,10 +413,11 @@ function App() {
         setReports(prev => ({ ...prev, [versionToUse]: htmlContent }));
       }
 
-      const isComplete = htmlContent.trim().endsWith('</html>');
+      // Check inclusion for robustness
+      const isComplete = htmlContent.includes('</html>');
       setIsReportIncomplete(!isComplete);
+      addLog('success', 'AI', 'Generation completed', { incomplete: !isComplete });
       
-      // Auto Save to Cloud on Completion (Optional, kept for convenience but manual button added)
       if (isComplete) {
           saveCurrentReportToCloud(versionToUse, htmlContent, targetMode, false);
       }
@@ -393,6 +428,7 @@ function App() {
           return;
       }
       console.error(err);
+      addLog('error', 'AI', 'Generation failed', { error: err.message });
       setAiError(err.message || "请求 AI 时发生未知错误");
     } finally {
       setAiLoading(false);
@@ -405,6 +441,7 @@ function App() {
 
     setAiLoading(true);
     setAiError(null);
+    addLog('info', 'AI', 'Continuing generation...');
     
     const controller = new AbortController();
     abortControllerRef.current = controller;
@@ -422,8 +459,8 @@ function App() {
         undefined,
         partialReport,
         controller.signal,
-        sysPrompt, // IMPORTANT: Pass the correct prompt for continuity
-        metaInfo // Pass meta info to AI for context continuity
+        sysPrompt,
+        metaInfo
       );
 
       let finalContent = partialReport;
@@ -432,10 +469,10 @@ function App() {
         setReports(prev => ({ ...prev, [activeReportVersion]: finalContent }));
       }
       
-      const isNowComplete = finalContent.trim().endsWith('</html>');
+      const isNowComplete = finalContent.includes('</html>');
       setIsReportIncomplete(!isNowComplete);
+      addLog('success', 'AI', 'Continuation successful');
 
-      // Auto Save to Cloud on Completion
       if (isNowComplete) {
         saveCurrentReportToCloud(activeReportVersion, finalContent, currentMode, false);
       }
@@ -443,6 +480,7 @@ function App() {
     } catch (err: any) {
       if (err.name === 'AbortError') return;
       console.error(err);
+      addLog('error', 'AI', 'Continuation failed', { error: err.message });
       setAiError(err.message || "续写报告时发生错误。");
     } finally {
       setAiLoading(false);
@@ -458,16 +496,20 @@ function App() {
      }
 
      setAutoFillingHerb(herbName);
+     addLog('info', 'HerbDB', `Auto-filling data for ${herbName}`);
      try {
          const newHerbData = await generateHerbDataWithAI(herbName, aiSettings);
          if (newHerbData) {
              registerDynamicHerb(newHerbData, true);
+             addLog('success', 'HerbDB', `Generated data for ${herbName}`);
              alert(`✨ 成功！AI 已生成【${herbName}】的数据。\n性味：${newHerbData.nature} | ${newHerbData.flavors.join(',')}\n归经：${newHerbData.meridians.join(',')}`);
              handleStartCalculation();
          } else {
+             addLog('warning', 'HerbDB', `Could not generate data for ${herbName}`);
              alert("AI 无法生成该药材的数据。");
          }
      } catch (e: any) {
+         addLog('error', 'HerbDB', `Auto-fill failed`, { error: e.message });
          alert(`补全失败: ${e.message}`);
      } finally {
          setAutoFillingHerb(null);
@@ -476,6 +518,7 @@ function App() {
   
   const handleUpdatePrescriptionFromChat = (newPrescription: string) => {
     setInput(newPrescription);
+    addLog('info', 'Chat', 'Prescription updated from Chat');
     try {
       const herbs = parsePrescription(newPrescription);
       const result = calculatePrescription(herbs);
@@ -498,50 +541,47 @@ function App() {
     });
   };
 
-  const handleDeleteReportVersion = () => {
-    if (!activeReportVersion || !(activeReportVersion in reports)) return;
+  const handleDeleteReportVersion = (versionToDelete: string, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    if (!versionToDelete || !(versionToDelete in reports)) return;
     
-    if (!window.confirm(`确定要删除版本 ${activeReportVersion} 吗？`)) return;
+    if (!window.confirm(`确定要删除版本 ${versionToDelete} 吗？`)) return;
     
-    // Remove from reports
     const newReports = { ...reports };
-    delete newReports[activeReportVersion];
+    delete newReports[versionToDelete];
     setReports(newReports);
 
-    // Remove from meta
     const newMeta = { ...reportMeta };
-    delete newMeta[activeReportVersion];
+    delete newMeta[versionToDelete];
     setReportMeta(newMeta);
 
-    // Determine next active version
-    const remainingVersions = Object.keys(newReports);
-    if (remainingVersions.length > 0) {
-        const sorted = sortVersions(remainingVersions);
-        // Switch to the last available version
-        setActiveReportVersion(sorted[sorted.length - 1]); 
-    } else {
-        // No reports left, reset to empty to show Selection UI
-        setActiveReportVersion('');
-        setIsReportIncomplete(false);
+    // If deleting current active, switch to last available
+    if (activeReportVersion === versionToDelete) {
+        const remainingVersions = Object.keys(newReports);
+        if (remainingVersions.length > 0) {
+            const sorted = sortVersions(remainingVersions);
+            setActiveReportVersion(sorted[sorted.length - 1]); 
+        } else {
+            setActiveReportVersion('V1');
+            setIsReportIncomplete(false);
+        }
     }
+    addLog('info', 'Report', `Deleted version ${versionToDelete}`);
   };
   
   const loadCloudReportToLocal = (cloudReport: CloudReport) => {
-      // 1. Set Input & Calculate
+      addLog('info', 'Cloud', `Importing cloud report: ${cloudReport.id}`);
       setInput(cloudReport.prescription);
       const herbs = parsePrescription(cloudReport.prescription);
       const result = calculatePrescription(herbs);
       setAnalysis(result);
       setInitialDosageRef(result.initialTotalDosage);
       
-      // 2. Set Report Content
-      // Create a virtual version name
       const importVer = `Cloud-${new Date(cloudReport.created_at).toLocaleDateString().replace(/\//g,'')}`;
       setReports({[importVer]: cloudReport.content});
       setReportMeta({[importVer]: { mode: cloudReport.meta?.mode || 'deep', timestamp: Date.now() }});
       setActiveReportVersion(importVer);
       
-      // 3. Switch View
       setView(ViewMode.REPORT);
       setShowReportHistory(false);
   };
@@ -559,6 +599,24 @@ function App() {
     } else {
         alert(`在药典数据库中未找到【${herbName}】的详细条目。`);
     }
+  };
+  
+  const handleSaveHerbChanges = async (updatedHerb: BenCaoHerb) => {
+      setIsSavingHerb(true);
+      try {
+        const success = await updateCloudHerb(updatedHerb.id, updatedHerb, aiSettings);
+        if (success) {
+            setEditingHerb(null);
+            await loadCustomHerbs(); // Refresh global list
+            alert("药材数据已更新！若该药材在当前处方中，请重新点击【开始演算】以应用新数据。");
+        } else {
+            alert("保存失败，请检查网络连接或 Supabase 权限。");
+        }
+      } catch (e: any) {
+          alert(`保存时发生错误: ${e.message}`);
+      } finally {
+          setIsSavingHerb(false);
+      }
   };
 
   const getTempBadgeStyle = (temp: string) => {
@@ -579,73 +637,141 @@ function App() {
               <span className="w-1.5 h-6 bg-indigo-600 rounded-full"></span> 处方物理明细
            </h3>
         </div>
-        <div className="overflow-x-auto">
-        <table className="w-full text-left border-collapse">
-          <thead className="bg-slate-50 text-slate-500 font-bold text-xs uppercase tracking-wider border-b border-slate-200">
-            <tr>
-              <th className="px-6 py-4">药名 (Herb)</th>
-              <th className="px-6 py-4 text-right">剂量 (g)</th>
-              <th className="px-6 py-4 text-center">药性/能值</th>
-              <th className="px-6 py-4 text-right">PTI 贡献</th>
-              <th className="px-6 py-4 text-right text-slate-400">矢量 (Vector)</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-50 text-sm">
-            {targetAnalysis.herbs.map((h, i) => {
-              const isLinked = !!h.staticData;
-              return (
-                <tr key={h.id} className={`hover:bg-indigo-50/40 transition-colors ${i % 2 === 0 ? 'bg-white' : 'bg-slate-50/30'}`}>
-                  <td className="px-6 py-4 font-bold text-slate-800">
-                     <div 
-                        className={`flex flex-col ${isLinked ? 'cursor-pointer group' : ''}`}
-                        onClick={() => isLinked && handleHerbClick(h.name, h.mappedFrom)}
-                     >
-                        <div className="flex items-center gap-2">
-                           <span className={`text-base ${isLinked ? 'text-slate-800 group-hover:text-indigo-600' : 'text-slate-600'}`}>
-                             {h.name}
-                           </span>
-                           {isLinked && (
-                             <span className="opacity-0 group-hover:opacity-100 transition-opacity text-[10px] text-indigo-400">
-                               ↗
-                             </span>
-                           )}
-                           {!isLinked && (
-                                <button 
-                                onClick={(e) => { e.stopPropagation(); handleAutoFillHerb(h.name); }}
-                                disabled={autoFillingHerb === h.name}
-                                className="text-[10px] bg-indigo-100 text-indigo-600 px-1.5 py-0.5 rounded hover:bg-indigo-200 transition"
-                                >
-                                {autoFillingHerb === h.name ? '...' : 'AI补全'}
-                                </button>
-                           )}
-                        </div>
+        
+        {/* Desktop Table */}
+        <div className="hidden md:block overflow-x-auto">
+          <table className="w-full text-left border-collapse">
+            <thead className="bg-slate-50 text-slate-500 font-bold text-xs uppercase tracking-wider border-b border-slate-200">
+              <tr>
+                <th className="px-6 py-4">药名 (Herb)</th>
+                <th className="px-6 py-4 text-right">剂量 (g)</th>
+                <th className="px-6 py-4 text-center">药性/能值</th>
+                <th className="px-6 py-4 text-right">PTI 贡献</th>
+                <th className="px-6 py-4 text-right text-slate-400">矢量 (Vector)</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-50 text-sm">
+              {targetAnalysis.herbs.map((h, i) => {
+                const isLinked = !!h.staticData;
+                return (
+                  <tr key={h.id} className={`hover:bg-indigo-50/40 transition-colors ${i % 2 === 0 ? 'bg-white' : 'bg-slate-50/30'}`}>
+                    <td className="px-6 py-4 font-bold text-slate-800">
+                      <div 
+                          className={`flex flex-col ${isLinked ? 'cursor-pointer group' : ''}`}
+                          onClick={() => isLinked && handleHerbClick(h.name, h.mappedFrom)}
+                      >
+                          <div className="flex items-center gap-2">
+                            <span className={`text-base ${isLinked ? 'text-slate-800 group-hover:text-indigo-600' : 'text-slate-600'}`}>
+                              {h.name}
+                            </span>
+                            {isLinked && (
+                              <span className="opacity-0 group-hover:opacity-100 transition-opacity text-[10px] text-indigo-400">
+                                ↗
+                              </span>
+                            )}
+                            {!isLinked && (
+                                  <button 
+                                  onClick={(e) => { e.stopPropagation(); handleAutoFillHerb(h.name); }}
+                                  disabled={autoFillingHerb === h.name}
+                                  className="text-[10px] bg-indigo-100 text-indigo-600 px-1.5 py-0.5 rounded hover:bg-indigo-200 transition"
+                                  >
+                                  {autoFillingHerb === h.name ? '...' : 'AI补全'}
+                                  </button>
+                            )}
+                          </div>
+                      </div>
+                    </td>
+                    <td className="px-6 py-4 text-right font-mono text-slate-600">
+                      {h.dosageGrams}
+                    </td>
+                    <td className="px-6 py-4 text-center">
+                      <span className={`px-3 py-1 rounded-full text-xs font-bold border ${getTempBadgeStyle(h.displayTemperature)}`}>
+                        {h.displayTemperature} <span className="opacity-50 mx-1">|</span> {h.hvCorrected.toFixed(1)}
+                      </span>
+                    </td>
+                    <td className={`px-6 py-4 text-right font-mono font-bold ${h.ptiContribution > 0 ? 'text-rose-500' : 'text-blue-500'}`}>
+                      {h.ptiContribution > 0 ? '+' : ''}{h.ptiContribution.toFixed(2)}
+                    </td>
+                    <td className="px-6 py-4 text-right font-mono text-xs text-slate-400">
+                      <span className="inline-block min-w-[30px]">{h.vector.x > 0 ? '散' : h.vector.x < 0 ? '收' : '平'}</span>
+                      <span className="text-slate-300 mx-1">/</span>
+                      <span className="inline-block min-w-[30px]">{h.vector.y > 0 ? '升' : h.vector.y < 0 ? '降' : '平'}</span>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Mobile Card List View */}
+        <div className="md:hidden space-y-3 p-4 bg-slate-50/50">
+           {targetAnalysis.herbs.map((h) => {
+             const isLinked = !!h.staticData;
+             return (
+               <div key={h.id} className="bg-white p-4 rounded-xl shadow-sm border border-slate-100 relative overflow-hidden flex flex-col gap-2">
+                  <div className="flex justify-between items-start">
+                     <div className="flex items-center gap-2">
+                        <span className="text-lg font-bold text-slate-800 font-serif-sc" onClick={() => isLinked && handleHerbClick(h.name, h.mappedFrom)}>
+                          {h.name}
+                        </span>
+                        {!isLinked && (
+                            <button 
+                              onClick={(e) => { e.stopPropagation(); handleAutoFillHerb(h.name); }}
+                              disabled={autoFillingHerb === h.name}
+                              className="text-[10px] bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded border border-indigo-100"
+                            >
+                              AI补全
+                            </button>
+                        )}
                      </div>
-                  </td>
-                  <td className="px-6 py-4 text-right font-mono text-slate-600">
-                    {h.dosageGrams}
-                  </td>
-                  <td className="px-6 py-4 text-center">
-                    <span className={`px-3 py-1 rounded-full text-xs font-bold border ${getTempBadgeStyle(h.displayTemperature)}`}>
-                      {h.displayTemperature} <span className="opacity-50 mx-1">|</span> {h.hvCorrected.toFixed(1)}
-                    </span>
-                  </td>
-                  <td className={`px-6 py-4 text-right font-mono font-bold ${h.ptiContribution > 0 ? 'text-rose-500' : 'text-blue-500'}`}>
-                    {h.ptiContribution > 0 ? '+' : ''}{h.ptiContribution.toFixed(2)}
-                  </td>
-                  <td className="px-6 py-4 text-right font-mono text-xs text-slate-400">
-                     <span className="inline-block min-w-[30px]">{h.vector.x > 0 ? '散' : h.vector.x < 0 ? '收' : '平'}</span>
-                     <span className="text-slate-300 mx-1">/</span>
-                     <span className="inline-block min-w-[30px]">{h.vector.y > 0 ? '升' : h.vector.y < 0 ? '降' : '平'}</span>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+                     <span className="font-mono text-lg text-slate-600 font-bold">{h.dosageGrams}<small className="text-xs text-slate-400 ml-0.5">g</small></span>
+                  </div>
+                  
+                  <div className="flex gap-2 items-center">
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${getTempBadgeStyle(h.displayTemperature)}`}>
+                        {h.displayTemperature} ({h.hvCorrected.toFixed(1)})
+                      </span>
+                      {h.staticData?.flavors.map(f => (
+                         <span key={f} className="text-[10px] bg-slate-100 text-slate-500 px-2 py-0.5 rounded">{f}</span>
+                      ))}
+                  </div>
+
+                  <div className="flex justify-between items-end border-t border-slate-50 pt-2 mt-1">
+                     <div className="text-xs text-slate-400 flex gap-2">
+                        <span>{h.vector.x > 0 ? '散' : h.vector.x < 0 ? '收' : '•'}</span>
+                        <span>{h.vector.y > 0 ? '升' : h.vector.y < 0 ? '降' : '•'}</span>
+                     </div>
+                     <div className={`font-mono font-black text-lg ${h.ptiContribution > 0 ? 'text-rose-500' : 'text-blue-500'}`}>
+                        {h.ptiContribution > 0 ? '+' : ''}{h.ptiContribution.toFixed(2)}
+                        <span className="text-[10px] text-slate-300 ml-1 font-normal uppercase">PTI</span>
+                     </div>
+                  </div>
+               </div>
+             );
+           })}
         </div>
       </div>
     );
   };
+
+  // Fixed Bottom Navigation Component
+  const MobileBottomNav = ({ currentView, setView }: { currentView: ViewMode, setView: (v: ViewMode) => void }) => (
+      <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 shadow-[0_-4px_20px_-10px_rgba(0,0,0,0.1)] z-50 lg:hidden safe-area-pb">
+        <div className="flex justify-around items-center h-16 px-1">
+          {NAV_ITEMS.map(item => (
+            <button
+              key={item.id}
+              onClick={() => setView(item.id)}
+              className={`flex flex-col items-center justify-center w-full h-full space-y-1 transition-colors ${currentView === item.id ? 'text-indigo-600' : 'text-slate-400'}`}
+            >
+              <span className={`text-2xl transition-transform ${currentView === item.id ? '-translate-y-1 scale-110' : ''}`}>{item.icon}</span>
+              <span className="text-[10px] font-bold scale-90">{item.label}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+  );
 
   return (
     <div 
@@ -656,15 +782,34 @@ function App() {
           <HerbDetailModal 
              herb={viewingHerb} 
              onClose={() => setViewingHerb(null)}
-             onEdit={() => {}}
+             onEdit={(h) => {
+                 setViewingHerb(null);
+                 setEditingHerb(h);
+             }}
+             onSwitch={handleHerbClick} // Pass the switcher
           />
       )}
       
+      {editingHerb && (
+        <EditHerbModal 
+            herb={editingHerb} 
+            onClose={() => setEditingHerb(null)} 
+            onSave={handleSaveHerbChanges}
+            isSaving={isSavingHerb}
+        />
+      )}
+      
+      {/* ... rest of App ... */}
       <AISettingsModal 
           isOpen={showAISettingsModal}
           onClose={() => setShowAISettingsModal(false)}
           settings={aiSettings}
           onSave={setAiSettings}
+      />
+
+      <LogViewer 
+          isOpen={showLogViewer} 
+          onClose={() => setShowLogViewer(false)} 
       />
       
       {/* Cloud Report History Sidebar */}
@@ -688,8 +833,8 @@ function App() {
                          cloudReports.map(r => (
                              <div 
                                  key={r.id}
+                                 className="p-4 border border-slate-100 rounded-xl bg-slate-50 hover:bg-indigo-50 hover:border-indigo-200 cursor-pointer transition-all group relative"
                                  onClick={() => loadCloudReportToLocal(r)}
-                                 className="p-4 border border-slate-100 rounded-xl bg-slate-50 hover:bg-indigo-50 hover:border-indigo-200 cursor-pointer transition-all group"
                              >
                                  <div className="flex justify-between items-start mb-2">
                                      <span className="text-xs font-mono text-slate-400 bg-white px-1.5 py-0.5 rounded border border-slate-100">
@@ -699,13 +844,22 @@ function App() {
                                          {r.meta?.mode === 'quick' ? '快速' : '深度'}
                                      </span>
                                  </div>
-                                 <div className="text-sm font-bold text-slate-700 line-clamp-2 mb-2 font-serif-sc">
+                                 <div className="text-sm font-bold text-slate-700 line-clamp-2 mb-2 font-serif-sc pr-6">
                                      {r.prescription}
                                  </div>
                                  <div className="flex items-center gap-2 text-[10px] text-slate-400">
                                      <span>{r.analysis_result?.top3?.[0]?.name ? `核心: ${r.analysis_result.top3[0].name}` : ''}</span>
                                      <span className="ml-auto opacity-0 group-hover:opacity-100 text-indigo-600 font-bold transition-opacity">加载 →</span>
                                  </div>
+
+                                 {/* Delete Button */}
+                                 <button 
+                                    onClick={(e) => handleDeleteCloudReport(r.id, e)}
+                                    className="absolute top-2 right-2 w-6 h-6 rounded-full bg-white text-slate-300 hover:bg-red-50 hover:text-red-500 border border-transparent hover:border-red-100 flex items-center justify-center transition-colors shadow-sm"
+                                    title="删除此存档"
+                                 >
+                                    ✕
+                                 </button>
                              </div>
                          ))
                      )}
@@ -715,23 +869,19 @@ function App() {
       )}
 
       {view !== ViewMode.INPUT && (
-        <header className="fixed top-0 z-50 w-full h-16 bg-white/80 backdrop-blur-xl border-b border-white shadow-sm flex items-center justify-between px-6 transition-all">
-          <div className="flex items-center gap-3 cursor-pointer" onClick={() => {
-              setView(ViewMode.INPUT);
-              setInitialDosageRef(null);
-            }}>
-             <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-600 to-indigo-700 text-white flex items-center justify-center font-bold shadow-lg shadow-indigo-200">L</div>
-             <span className="font-bold text-lg font-serif-sc text-slate-800 tracking-tight">LogicMaster</span>
+        <header className="fixed top-0 z-50 w-full h-16 bg-white/80 backdrop-blur-xl border-b border-white shadow-sm flex items-center justify-between px-4 lg:px-6 transition-all">
+          <div className="flex items-center gap-3">
+             <div className="flex items-center gap-2 cursor-pointer" onClick={() => {
+                  setView(ViewMode.INPUT);
+                  setInitialDosageRef(null);
+                }}>
+                <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-600 to-indigo-700 text-white flex items-center justify-center font-bold shadow-lg shadow-indigo-200">L</div>
+                <span className="font-bold text-lg font-serif-sc text-slate-800 tracking-tight hidden md:inline">LogicMaster</span>
+             </div>
           </div>
           
           <nav className="hidden lg:flex bg-slate-100/50 p-1 rounded-full border border-slate-200/50">
-            {[
-              { id: ViewMode.WORKSHOP, label: '计算工坊' },
-              { id: ViewMode.VISUAL, label: '三焦动力学' },
-              { id: ViewMode.REPORT, label: 'AI 深度推演' },
-              { id: ViewMode.AI_CHAT, label: 'AI 问答' },
-              { id: ViewMode.DATABASE, label: '中华药典' }
-            ].map(tab => (
+            {NAV_ITEMS.map(tab => (
               <button
                 key={tab.id}
                 onClick={() => setView(tab.id)}
@@ -747,6 +897,15 @@ function App() {
           </nav>
 
           <div className="flex items-center gap-2">
+             {/* Log Viewer Trigger */}
+             <button 
+                onClick={() => setShowLogViewer(true)}
+                className="p-2 rounded-lg transition-colors bg-white border border-slate-100 text-slate-400 hover:text-indigo-600 hover:border-indigo-100 shadow-sm"
+                title="系统日志"
+             >
+                <span className="text-sm">📟</span>
+             </button>
+
              <button 
                 onClick={() => setShowAISettingsModal(true)}
                 className="p-2 rounded-lg transition-colors bg-white border border-slate-100 text-slate-400 hover:text-indigo-600 hover:border-indigo-100 shadow-sm"
@@ -812,26 +971,29 @@ function App() {
         </header>
       )}
 
-      <main className={`flex-1 w-full z-10 ${view !== ViewMode.INPUT ? 'pt-24 pb-8 px-4 lg:px-8' : 'flex items-center justify-center p-6'}`}>
+      {/* Mobile Bottom Navigation */}
+      <MobileBottomNav currentView={view} setView={setView} />
+
+      <main className={`flex-1 w-full z-10 ${view !== ViewMode.INPUT ? 'pt-24 pb-24 lg:pb-8 px-4 lg:px-8' : 'flex items-center justify-center p-6 pb-24'}`}>
         
         {view === ViewMode.INPUT && (
           <div className="w-full max-w-3xl animate-in zoom-in-95 duration-500">
-             <div className="text-center mb-12">
-                <div className="w-24 h-24 mx-auto bg-gradient-to-br from-white to-slate-50 rounded-3xl shadow-xl shadow-indigo-100/50 flex items-center justify-center text-5xl mb-6 ring-1 ring-slate-100 text-indigo-600 transform hover:scale-105 transition-transform duration-500">💊</div>
-                <h1 className="text-5xl md:text-6xl font-black font-serif-sc text-slate-900 mb-4 tracking-tight">LogicMaster <span className="text-indigo-600">TCM</span></h1>
-                <p className="text-slate-500 text-xl font-medium">通用中医计算引擎 · 经方/时方/三焦动力学仿真</p>
+             <div className="text-center mb-8 md:mb-12">
+                <div className="w-20 h-20 md:w-24 md:h-24 mx-auto bg-gradient-to-br from-white to-slate-50 rounded-3xl shadow-xl shadow-indigo-100/50 flex items-center justify-center text-4xl md:text-5xl mb-6 ring-1 ring-slate-100 text-indigo-600 transform hover:scale-105 transition-transform duration-500">💊</div>
+                <h1 className="text-3xl md:text-6xl font-black font-serif-sc text-slate-900 mb-4 tracking-tight">LogicMaster <span className="text-indigo-600">TCM</span></h1>
+                <p className="text-slate-500 text-base md:text-xl font-medium">通用中医计算引擎 · 经方/时方/三焦动力学仿真</p>
              </div>
              
-             <div className="bg-white p-3 rounded-[2.5rem] shadow-2xl shadow-indigo-200/40 border border-slate-100 relative overflow-hidden group">
+             <div className="bg-white p-3 rounded-[2rem] md:rounded-[2.5rem] shadow-2xl shadow-indigo-200/40 border border-slate-100 relative overflow-hidden group">
                 <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 opacity-0 group-hover:opacity-100 transition-opacity"></div>
                 <textarea
                    value={input}
                    onChange={e => setInput(e.target.value)}
-                   className="w-full h-48 bg-slate-50 rounded-[2rem] p-8 text-2xl text-slate-800 placeholder-slate-300 border-transparent focus:bg-white focus:ring-0 transition-all resize-none font-serif-sc outline-none"
+                   className="w-full h-40 md:h-48 bg-slate-50 rounded-[1.5rem] md:rounded-[2rem] p-6 md:p-8 text-lg md:text-2xl text-slate-800 placeholder-slate-300 border-transparent focus:bg-white focus:ring-0 transition-all resize-none font-serif-sc outline-none"
                    placeholder="在此输入处方..."
                 />
                 <div className="p-2 flex gap-3">
-                   <button onClick={handleStartCalculation} className="flex-1 bg-slate-900 text-white text-xl font-bold py-5 rounded-[1.8rem] shadow-xl hover:bg-indigo-900 hover:shadow-2xl hover:-translate-y-0.5 transition-all flex items-center justify-center gap-3">
+                   <button onClick={handleStartCalculation} className="flex-1 bg-slate-900 text-white text-lg md:text-xl font-bold py-4 md:py-5 rounded-[1.5rem] md:rounded-[1.8rem] shadow-xl hover:bg-indigo-900 hover:shadow-2xl hover:-translate-y-0.5 transition-all flex items-center justify-center gap-3">
                      <span>🚀</span> 开始演算
                    </button>
                 </div>
@@ -845,19 +1007,20 @@ function App() {
           </div>
         )}
 
+        {/* ... (Existing workshop, visual, database views) ... */}
         {view === ViewMode.WORKSHOP && analysis && (
-          <div className="space-y-8 animate-in slide-in-from-bottom-4 fade-in max-w-[1600px] mx-auto">
-             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div className="space-y-6 md:space-y-8 animate-in slide-in-from-bottom-4 fade-in max-w-[1600px] mx-auto">
+             <div className="flex flex-col md:grid md:grid-cols-3 gap-4 md:gap-6">
                 
                 {/* Card 1: Total PTI */}
-                <div className="bg-white/80 backdrop-blur-xl p-8 rounded-[2rem] shadow-xl shadow-slate-100/50 border border-white flex flex-col justify-between group hover:-translate-y-1 transition-transform duration-300 relative overflow-hidden">
+                <div className="bg-white/80 backdrop-blur-xl p-5 md:p-8 rounded-[2rem] shadow-xl shadow-slate-100/50 border border-white flex flex-col justify-between group hover:-translate-y-1 transition-transform duration-300 relative overflow-hidden min-h-[160px]">
                    <div className={`absolute top-0 right-0 w-32 h-32 rounded-full blur-3xl opacity-20 -translate-y-1/2 translate-x-1/2 ${getPTILabel(analysis.totalPTI).bg.replace('bg-', 'bg-')}`}></div>
                    <div>
                       <div className="flex items-center gap-2 mb-2">
                          <span className={`w-2 h-2 rounded-full ${getPTILabel(analysis.totalPTI).bg.replace('bg-', 'bg-').replace('50', '500')}`}></span>
                          <span className="text-xs text-slate-400 font-bold uppercase tracking-wider">Total PTI Index</span>
                       </div>
-                      <div className={`text-6xl font-black font-mono tracking-tighter ${getPTILabel(analysis.totalPTI).color}`}>
+                      <div className={`text-5xl md:text-6xl font-black font-mono tracking-tighter ${getPTILabel(analysis.totalPTI).color}`}>
                         {analysis.totalPTI > 0 ? '+' : ''}{analysis.totalPTI.toFixed(3)}
                       </div>
                    </div>
@@ -869,35 +1032,35 @@ function App() {
                 </div>
 
                 {/* Card 2: Primary Driver */}
-                <div className="bg-white/80 backdrop-blur-xl p-8 rounded-[2rem] shadow-xl shadow-slate-100/50 border border-white flex flex-col justify-between group hover:-translate-y-1 transition-transform duration-300">
+                <div className="bg-white/80 backdrop-blur-xl p-5 md:p-8 rounded-[2rem] shadow-xl shadow-slate-100/50 border border-white flex flex-col justify-between group hover:-translate-y-1 transition-transform duration-300 min-h-[160px]">
                    <div>
                       <div className="flex items-center gap-2 mb-2">
                          <span className="w-2 h-2 rounded-full bg-slate-300"></span>
                          <span className="text-xs text-slate-400 font-bold uppercase tracking-wider">Primary Driver</span>
                       </div>
-                      <div className="text-4xl font-bold text-slate-800 font-serif-sc mb-1">
+                      <div className="text-3xl md:text-4xl font-bold text-slate-800 font-serif-sc mb-1 truncate">
                         {analysis.top3[0]?.name || '-'}
                       </div>
                       <div className="text-sm text-slate-400">
                          Contribution Factor
                       </div>
                    </div>
-                   <div className="self-end">
-                      <div className={`font-mono font-black text-4xl ${analysis.top3[0]?.ptiContribution > 0 ? 'text-rose-500' : 'text-blue-500'}`}>
+                   <div className="self-end mt-2">
+                      <div className={`font-mono font-black text-3xl md:text-4xl ${analysis.top3[0]?.ptiContribution > 0 ? 'text-rose-500' : 'text-blue-500'}`}>
                         {analysis.top3[0]?.ptiContribution > 0 ? '+' : ''}{analysis.top3[0]?.ptiContribution.toFixed(2)}
                       </div>
                    </div>
                 </div>
                 
                 {/* Card 3: Dosage */}
-                <div className="bg-white/80 backdrop-blur-xl p-8 rounded-[2rem] shadow-xl shadow-slate-100/50 border border-white flex flex-col justify-between group hover:-translate-y-1 transition-transform duration-300">
+                <div className="bg-white/80 backdrop-blur-xl p-5 md:p-8 rounded-[2rem] shadow-xl shadow-slate-100/50 border border-white flex flex-col justify-between group hover:-translate-y-1 transition-transform duration-300 min-h-[160px]">
                    <div>
                       <div className="flex items-center gap-2 mb-2">
                          <span className="w-2 h-2 rounded-full bg-slate-300"></span>
                          <span className="text-xs text-slate-400 font-bold uppercase tracking-wider">Total Dosage</span>
                       </div>
-                      <div className="text-5xl font-black font-mono text-slate-800 tracking-tight">
-                        {analysis.herbs.reduce((sum, h) => sum + h.dosageGrams, 0).toFixed(1)}<span className="text-2xl ml-1 text-slate-400 font-bold">g</span>
+                      <div className="text-4xl md:text-5xl font-black font-mono text-slate-800 tracking-tight">
+                        {analysis.herbs.reduce((sum, h) => sum + h.dosageGrams, 0).toFixed(1)}<span className="text-xl md:text-2xl ml-1 text-slate-400 font-bold">g</span>
                       </div>
                    </div>
                    <div className="flex justify-between items-end border-t border-slate-100 pt-4 mt-4">
@@ -947,20 +1110,34 @@ function App() {
                           )}
                       </div>
 
-                      <div className="flex gap-2 items-center">
-                          {Object.keys(reports).length > 1 && (
-                            <div className="flex bg-slate-100 rounded-lg p-1 mr-4">
-                                {sortVersions(Object.keys(reports)).map(v => (
+                      <div className="flex gap-2 items-center flex-wrap justify-end w-full md:w-auto">
+                          {/* Version Tabs */}
+                          <div className="flex bg-slate-100 rounded-lg p-1 mr-0 md:mr-4 overflow-x-auto max-w-[200px] md:max-w-none no-scrollbar">
+                              {sortVersions(Object.keys(reports)).map(v => (
+                                  <div key={v} className="relative group shrink-0">
                                     <button 
-                                        key={v}
                                         onClick={() => setActiveReportVersion(v)}
                                         className={`px-3 py-1 rounded-md text-xs font-bold transition-all ${activeReportVersion === v ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}
                                     >
                                         {v}
                                     </button>
-                                ))}
-                            </div>
-                          )}
+                                    {/* Mini Delete Button for Version (Always Visible on mobile/active, visible on hover for others) */}
+                                    <button
+                                        onClick={(e) => handleDeleteReportVersion(v, e)}
+                                        className={`absolute -top-1 -right-1 w-4 h-4 bg-red-500 text-white rounded-full text-[10px] items-center justify-center shadow-sm z-10 transition-opacity ${activeReportVersion === v ? 'flex' : 'hidden group-hover:flex'}`}
+                                        title="删除此版本"
+                                    >✕</button>
+                                  </div>
+                              ))}
+                              {/* Create New Version Button */}
+                              <button
+                                  onClick={() => handleAskAI(reportMeta[activeReportVersion]?.mode || 'deep')}
+                                  className="px-2 py-1 ml-1 rounded-md text-xs font-bold text-indigo-600 hover:bg-indigo-50 transition-all flex items-center gap-1 shrink-0"
+                                  title="生成新版本"
+                              >
+                                  + 新版
+                              </button>
+                          </div>
 
                           {aiLoading ? (
                                 <button onClick={handleStopAI} className="text-xs font-bold text-red-600 bg-red-50 px-3 py-2 rounded-lg border border-red-100 hover:bg-red-100 flex items-center gap-1 animate-pulse">
@@ -981,7 +1158,7 @@ function App() {
                                         onClick={handleResetCurrentVersion} 
                                         className="text-xs font-bold text-indigo-600 bg-indigo-50 px-3 py-2 rounded-lg border border-indigo-100 hover:bg-indigo-100 flex items-center gap-1"
                                     >
-                                        <span>↺</span> 重置并重新生成
+                                        <span>↺</span> 重写当前版
                                     </button>
                                     <button 
                                         onClick={() => setShowReportHistory(true)} 
@@ -996,8 +1173,8 @@ function App() {
                                         复制代码
                                     </button>
                                     <button 
-                                        onClick={handleDeleteReportVersion} 
-                                        className="text-xs font-bold text-red-600 bg-red-50 px-3 py-2 rounded-lg border border-red-100 hover:bg-red-100"
+                                        onClick={() => handleDeleteReportVersion(activeReportVersion)}
+                                        className="text-xs font-bold text-red-600 bg-red-50 px-3 py-2 rounded-lg border border-red-100 hover:bg-red-100 flex items-center gap-1"
                                     >
                                         删除
                                     </button>
@@ -1037,7 +1214,7 @@ function App() {
               ) : reports[activeReportVersion] ? (
                  <div className="flex flex-col gap-6">
                     <div 
-                      className="prose prose-slate max-w-none bg-white p-8 md:p-12 rounded-[2.5rem] shadow-xl border border-slate-100"
+                      className="prose prose-slate max-w-none bg-white p-6 md:p-12 rounded-[2rem] md:rounded-[2.5rem] shadow-xl border border-slate-100"
                       dangerouslySetInnerHTML={{ __html: processReportContent(reports[activeReportVersion]) }}
                       onClick={handleReportClick}
                     />
@@ -1164,4 +1341,11 @@ function App() {
   );
 }
 
-export default App;
+// Wrap App with Providers
+export default function App() {
+  return (
+    <LogProvider>
+      <LogicMasterApp />
+    </LogProvider>
+  );
+}

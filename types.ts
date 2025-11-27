@@ -1,9 +1,4 @@
 
-
-
-
-
-
 export enum Flavor {
   PUNGENT = '辛',
   BITTER = '苦',
@@ -210,8 +205,10 @@ export interface AISettings {
   apiKey: string;           // 用户输入的 Key
   apiBaseUrl: string;       // 用户输入的 Base URL (e.g., https://api.openai.com/v1)
   
-  analysisModel: string;    // 深度推演使用的模型ID
-  chatModel: string;        // 问答使用的模型ID
+  model: string;            // 主模型 (Unified Model)
+  analysisModel?: string;   // Deprecated: Kept for compatibility
+  chatModel?: string;       // Deprecated: Kept for compatibility
+  
   availableModels: ModelOption[]; // 从API获取的模型列表
 
   systemInstruction: string; // 虽然UI隐藏，但内部仍需保留传递给SDK
@@ -224,4 +221,25 @@ export interface AISettings {
   // Cloud Database Settings (Supabase)
   supabaseUrl?: string;
   supabaseKey?: string;
+}
+
+// === Chat Attachment Interface ===
+export interface ChatAttachment {
+  id: string;
+  type: 'image' | 'file';
+  name: string;
+  content: string; // Base64 or Text content
+  mimeType?: string;
+}
+
+// === Event Log Interface ===
+export type LogLevel = 'info' | 'success' | 'warning' | 'error' | 'action';
+
+export interface LogEntry {
+  id: string;
+  timestamp: number;
+  level: LogLevel;
+  module: string; // e.g. "Chat", "System", "Supabase"
+  message: string;
+  details?: any; // JSON object for detailed payload
 }

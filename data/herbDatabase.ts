@@ -75,8 +75,6 @@ export const HERB_ALIASES: Record<string, string> = {
   // 新增常用别名
   '莲子肉': '莲子',
   '湘莲': '莲子',
-  '炒薏苡仁': '薏苡仁', 
-  '炒薏米': '薏苡仁',
   '薏米': '薏苡仁',
   '生薏米': '薏苡仁',
   '旱莲草': '墨旱莲',
@@ -310,42 +308,14 @@ export const getHerbInfo = (inputName: string): {
     mappedFrom = cleanName;
     const aliasName = HERB_ALIASES[cleanName];
     if (HERB_CATALOG[aliasName]) {
-       return { coreName: aliasName, processing: '', data: HERB_CATALOG[aliasName], mappedFrom };
+       return { coreName: aliasName, processing: '', data: HERB_CATALOG[aliasName], mappedFrom: inputName };
     }
   }
 
-  // 3. Strip Processing Suffix/Prefix
-  // Logic: Try to find the longest possible herb name within the string
-  // e.g. "炒酸枣仁" -> "酸枣仁" (found) + "炒"
-  
-  // Sort prefixes by length descending to match "蜜炙" before "蜜"
-  const prefixes = Object.keys(PROCESSING_DELTAS).sort((a,b) => b.length - a.length);
-  
-  for (const p of prefixes) {
-    if (cleanName.startsWith(p)) {
-      const core = cleanName.substring(p.length);
-      
-      // Check core directly
-      if (HERB_CATALOG[core]) {
-         return { coreName: core, processing: p, data: HERB_CATALOG[core], mappedFrom: inputName };
-      }
-      
-      // Check core alias
-      if (HERB_ALIASES[core]) {
-        const finalCore = HERB_ALIASES[core];
-        if (HERB_CATALOG[finalCore]) {
-           return { coreName: finalCore, processing: p, data: HERB_CATALOG[finalCore], mappedFrom: inputName };
-        }
-      }
-    }
-    
-    if (cleanName.endsWith(p)) {
-       const core = cleanName.substring(0, cleanName.length - p.length);
-        if (HERB_CATALOG[core]) {
-         return { coreName: core, processing: p, data: HERB_CATALOG[core], mappedFrom: inputName };
-      }
-    }
-  }
+  // 3. REMOVED: Strip Processing Suffix/Prefix
+  // 原因：用户要求严格匹配炮制品（如“炒白术”应视为独立药材，不应自动降级为“白术”）。
+  // 如果数据库中没有“炒白术”，应返回 data: null，触发 UI 的“AI补全”功能，
+  // 从而生成专门针对该炮制品的药性数据。
 
   return { coreName: inputName, processing: '', data: null, mappedFrom };
 };

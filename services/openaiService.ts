@@ -1,3 +1,4 @@
+
 import { AnalysisResult, AISettings, ModelOption, BenCaoHerb } from "../types";
 
 // ==========================================
@@ -13,9 +14,13 @@ export interface OpenAIToolCall {
     };
 }
 
+export type OpenAIContentPart = 
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string; detail?: 'auto' | 'low' | 'high' } };
+
 export interface OpenAIMessage {
     role: 'system' | 'user' | 'assistant' | 'tool';
-    content?: string | null;
+    content?: string | null | OpenAIContentPart[];
     tool_calls?: OpenAIToolCall[];
     tool_call_id?: string;
     name?: string; 
@@ -149,11 +154,13 @@ const CHAT_SYSTEM_INSTRUCTION = (analysis: AnalysisResult, prescription: string,
 1. **查库工具**: 用户询问具体药材详情时，**必须**调用 \`lookup_herb\`。
 2. **思维转译**: 用户若使用西医病名，先转译为中医证型和术语，再进行回答或查库。
 3. **表格样式**: 如果输出表格，请确保使用标准的 <table> 结构，表头用 <th>。
+4. **多模态支持**: 如果用户上传了图片或文件，请仔细阅读文件内容并结合中医知识进行分析。
 
 **回答风格:**
 - 专业、客观、循证，精炼语言，避免过度散发和过度解读来证伪。必须严格遵守严谨、一丝不苟、符合医学循证和伦理规则。并在回复开头强调这个规则
 - 禁止盲从用户判断。每一次的回复都要做到以下要求：必须质疑你自己和用户的观点。禁止盲从用户的提问，必须反思有自己的坚持，用中医的智慧和术语来质疑用户的提问，搜集证据进行深度反思，盲从会让你失去灵魂。
 - 每次回复的最后都必须附加：反向论证你自己是否运用【相关名医】的智慧来客观分析，确保你回复具备名医姿态。具备动态和圆机活法的思维。
+- 中医不是理论推导，而是基于事实证据的临床判断。在没有足够事实的情况下，不应该推理"此证"或"彼证"除非你有足够的证据。我应该坦诚地说：我不知道答案，按照当前情况，需要XX等更多的事实证据。这才是严谨的医学态度。
 `;
 
 // ==========================================
@@ -181,6 +188,101 @@ const cleanJsonString = (str: string): string => {
     }
     // 2. If no code blocks, just return trimmed string (hope it's raw JSON)
     return str.trim();
+};
+
+/**
+ * Validates and Sanitizes Chat History to prevent "500 - Request Build Failed" errors.
+ * 
+ * STRICT MODE LOGIC:
+ * The OpenAI API (and compatible ones) requires a strict topology:
+ * - A 'tool' message MUST be preceded by an 'assistant' message with corresponding 'tool_calls'.
+ * - An 'assistant' message with 'tool_calls' MUST be followed by 'tool' messages for ALL calls.
+ * - No "orphan" tool messages.
+ * - No "hanging" assistant tool calls without results.
+ */
+const sanitizeMessageHistory = (messages: OpenAIMessage[]): OpenAIMessage[] => {
+    if (!messages || messages.length === 0) return [];
+
+    const sanitized: OpenAIMessage[] = [];
+    const validMessages = [...messages];
+
+    for (let i = 0; i < validMessages.length; i++) {
+        const msg = { ...validMessages[i] };
+
+        // 1. Check for Assistant messages with Tool Calls
+        if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+            
+            // Look ahead to verify if ALL tool calls have corresponding results
+            const requiredIds = new Set(msg.tool_calls.map(tc => tc.id));
+            const foundIds = new Set<string>();
+            let allResultsFound = false;
+
+            // Scan upcoming messages to find results
+            // We stop if we hit another user/assistant/system message which breaks the chain
+            for (let j = i + 1; j < validMessages.length; j++) {
+                const nextMsg = validMessages[j];
+                if (nextMsg.role === 'tool') {
+                    if (nextMsg.tool_call_id && requiredIds.has(nextMsg.tool_call_id)) {
+                        foundIds.add(nextMsg.tool_call_id);
+                    }
+                } else {
+                    // Chain broken by non-tool message
+                    break;
+                }
+            }
+
+            // Check if we found all results
+            if (requiredIds.size === foundIds.size) {
+                // Perfect, keep this assistant message and let the loop naturally pick up the tool messages later
+                sanitized.push(msg);
+            } else {
+                // WARNING: Hanging Tool Call detected!
+                // The API will error 500 if we send this.
+                // FIX: Strip the tool_calls from this message to make it a plain text message.
+                delete msg.tool_calls;
+                
+                // If stripping tool_calls leaves it empty (no content), we must drop it entirely.
+                if (msg.content) {
+                    sanitized.push(msg);
+                } else {
+                    // Drop this empty message.
+                    // Also, we must proactively skip the subsequent "orphan" tool messages for the partial ids we found.
+                    // But our generic "orphan check" below will handle that naturally.
+                    continue; 
+                }
+            }
+        } 
+        
+        // 2. Check for Tool Messages (Orphan Check)
+        else if (msg.role === 'tool') {
+            // A tool message is valid ONLY if the IMMEDIATELY PRECEDING accepted message 
+            // was an assistant message that requested this tool_call_id.
+            
+            const lastAccepted = sanitized[sanitized.length - 1];
+            
+            if (lastAccepted && lastAccepted.role === 'assistant' && lastAccepted.tool_calls) {
+                const parentCall = lastAccepted.tool_calls.find(tc => tc.id === msg.tool_call_id);
+                if (parentCall) {
+                    sanitized.push(msg);
+                } else {
+                    // Orphan: The previous message didn't ask for this ID. Drop it.
+                }
+            } else {
+                // Orphan: Previous message wasn't even an assistant with tools. Drop it.
+            }
+        }
+        
+        // 3. Regular Messages (System, User, Assistant text-only)
+        else {
+            // Drop empty messages unless they are assistant (sometimes assistant sends empty during stream, but we should probably filter)
+            // But usually we want to keep them if they have content.
+            if (msg.content || (msg.role === 'assistant' && msg.tool_calls)) {
+                 sanitized.push(msg);
+            }
+        }
+    }
+
+    return sanitized;
 };
 
 // ==========================================
@@ -234,8 +336,14 @@ export const generateHerbDataWithAI = async (herbName: string, settings: AISetti
 你的任务是为名为"${herbName}"的中药补充详细数据。
 请严格按照以下 JSON 格式返回数据，不要包含任何 Markdown 格式。
 
-**非常重要：**
-"nature" (四气) 字段必须严格从以下枚举中选取一个，**严禁使用其他描述**，严禁使用“性”字前缀：
+**核心指令：炮制品增强 (Pao Zhi Enhancement)**
+- 如果该药是炮制品（如盐杜仲、酒大黄、炙甘草、甘草泡地龙、醋延胡索等），你**必须**在 'efficacy' (功能主治) 字段中明确描述该特定炮制方法带来的药性变化和功效侧重。
+- 例如：对于"盐杜仲"，efficacy 必须包含"盐炙引药入肾，增强补肝肾、强筋骨作用"。
+- 例如：对于"炙甘草"，efficacy 必须体现"补脾和胃，益气复脉"侧重于补益，不同于生甘草的清热解毒。
+- 如果是复方泡制（如甘草泡地龙），请说明这种特殊制法对药性的缓和或协同作用。
+
+**字段规范：**
+"nature" (四气) 必须严格从以下枚举中选取一个，**严禁使用其他描述**：
 ["大热", "热", "温", "微温", "平", "微寒", "凉", "寒", "大寒"]
 
 **严格区分凉与寒：**
@@ -243,14 +351,13 @@ export const generateHerbDataWithAI = async (herbName: string, settings: AISetti
 - **寒 (Cold)**: 对应枚举值 "寒"。
 - 如果该药性味为“苦寒”，nature字段只能填“寒”，flavors字段填“苦”。
 - 如果该药性味为“辛凉”，nature字段只能填“凉”，flavors字段填“辛”。
-- **绝对不要**使用“微凉”、“大凉”等非标准词汇。
 
 {
   "name": "${herbName}",
   "nature": "枚举值之一，如: 温",
   "flavors": ["五味数组", "例如", "辛", "苦"],
   "meridians": ["归经数组", "例如", "肝", "脾"],
-  "efficacy": "功能主治 (简练概括)",
+  "efficacy": "功能主治 (务必包含炮制品的特色功效描述)",
   "usage": "用法用量 (例如: 3~9g)",
   "category": "药材 或 炮制品",
   "processing": "如有炮制方法则填，否则填 生用"
@@ -260,7 +367,7 @@ export const generateHerbDataWithAI = async (herbName: string, settings: AISetti
     try {
         const url = `${getBaseUrl(settings.apiBaseUrl)}/chat/completions`;
         const payload = {
-            model: settings.analysisModel || "gpt-3.5-turbo",
+            model: settings.model || settings.analysisModel || "gpt-3.5-turbo",
             messages: [{ role: "system", content: systemPrompt }, { role: "user", content: herbName }],
             temperature: 0.1, // Low temp for strict format
             // response_format: { type: "json_object" } // Optional depending on model support
@@ -301,7 +408,7 @@ export const generateHerbDataWithAI = async (herbName: string, settings: AISetti
 /**
  * Summarize Chat History (Context Compression)
  */
-export const summarizeMessages = async (messages: OpenAIMessage[], settings: AISettings): Promise<string> => {
+export const summarizeMessages = async (messages: any[], settings: AISettings): Promise<string> => {
     if (!settings.apiKey) throw new Error("API Key is missing for summarization");
 
     const systemPrompt = "你是一位专业的对话总结助手。请将以下对话历史压缩成一段精炼的“记忆摘要”。保留关键的医学判断、药方修改记录和重要结论。忽略无关的寒暄。摘要应以第三人称描述，例如“用户询问了...AI建议...”。";
@@ -309,7 +416,7 @@ export const summarizeMessages = async (messages: OpenAIMessage[], settings: AIS
     try {
         const url = `${getBaseUrl(settings.apiBaseUrl)}/chat/completions`;
         const payload = {
-            model: settings.chatModel || "gpt-3.5-turbo",
+            model: settings.model || settings.chatModel || "gpt-3.5-turbo",
             messages: [{ role: "system", content: systemPrompt }, ...messages],
             temperature: 0.3,
             max_tokens: 500
@@ -378,7 +485,7 @@ export async function* analyzePrescriptionWithAI(
     }
 
     const payload = {
-        model: settings.analysisModel || "gpt-3.5-turbo",
+        model: settings.model || settings.analysisModel || "gpt-3.5-turbo",
         messages: messages,
         temperature: settings.temperature,
         top_p: settings.topP,
@@ -440,10 +547,10 @@ export async function* analyzePrescriptionWithAI(
 };
 
 /**
- * Chat Stream Generation with Safe Context Management
+ * Chat Stream Generation with Safe Context Management and Multimodal Support
  */
 export async function* generateChatStream(
-    history: OpenAIMessage[],
+    history: any[], // Raw internal messages
     analysis: AnalysisResult,
     prescription: string,
     reportContent: string | undefined,
@@ -453,7 +560,7 @@ export async function* generateChatStream(
 ): AsyncGenerator<{ text?: string, functionCalls?: {id: string, name: string, args: any}[] }, void, unknown> {
     const url = `${getBaseUrl(settings.apiBaseUrl)}/chat/completions`;
     
-    // 1. Safety Truncate Large Contexts (Report & Meta)
+    // 1. Safety Truncate Large Contexts
     const MAX_REPORT_CHARS = 10000;
     const safeReportContent = reportContent && reportContent.length > MAX_REPORT_CHARS 
         ? reportContent.slice(0, MAX_REPORT_CHARS) + "\n\n[...System Note: Report truncated due to length limits...]"
@@ -470,52 +577,80 @@ export async function* generateChatStream(
         content: CHAT_SYSTEM_INSTRUCTION(analysis, prescription, safeReportContent, safeMetaInfo)
     };
 
-    // 3. Robust Context Pruning Algorithm
-    // Goal: Fit within context limits WITHOUT breaking Tool Call Chains or creating Orphan Assistant/Tool messages.
-    // OpenAI Strict Rule: Messages must generally follow User -> Assistant -> Tool -> Assistant ...
-    // Most Critical: A tool message MUST be preceded by an assistant tool_call.
-    
-    const MAX_CONTEXT_CHARS = 200000; // Large heuristic limit for history
-    const lastUserMsg = history[history.length - 1]; // Always keep the latest trigger
-    const previousHistory = history.slice(0, history.length - 1); // Candidates for pruning
-    
-    let messagesToSend: OpenAIMessage[] = [];
-    let currentLength = 0;
+    // 3. Convert Internal History to OpenAI API Format (Multimodal Support)
+    // IMPORTANT: This mapping logic handles attachments (images/files)
+    const apiHistory: OpenAIMessage[] = history.map(m => {
+        // Base structure
+        const apiMsg: OpenAIMessage = {
+            role: m.role === 'model' ? 'assistant' : (m.role === 'tool' ? 'tool' : 'user'),
+            content: null
+        };
 
-    // A. Backwards collection: Keep the most recent messages first
-    for (let i = previousHistory.length - 1; i >= 0; i--) {
-        const msg = previousHistory[i];
-        const len = (msg.content || '').length + JSON.stringify(msg.tool_calls || []).length;
-        if (currentLength + len < MAX_CONTEXT_CHARS) {
-            messagesToSend.unshift(msg);
-            currentLength += len;
+        if (m.role === 'tool') {
+             apiMsg.tool_call_id = m.toolCallId;
+             apiMsg.content = m.text;
+        } else if (m.role === 'model') {
+             apiMsg.content = m.text || null;
+             apiMsg.tool_calls = m.toolCalls;
         } else {
-            break;
+             // User Role: Check for Attachments (Images/Files)
+             if (m.attachments && m.attachments.length > 0) {
+                 const contentParts: OpenAIContentPart[] = [];
+                 
+                 // Add Text First (if any)
+                 if (m.text) {
+                     contentParts.push({ type: 'text', text: m.text });
+                 }
+                 
+                 // Add Attachments
+                 m.attachments.forEach((att: any) => {
+                     if (att.type === 'image') {
+                         contentParts.push({
+                             type: 'image_url',
+                             image_url: { url: att.content } // base64
+                         });
+                     } else {
+                         // Text files are appended to text content for better context understanding
+                         // Files are essentially embedded text
+                         const fileContext = `\n\n[用户上传文件内容: ${att.name}]\n${att.content}\n`;
+                         const textPart = contentParts.find(p => p.type === 'text');
+                         if (textPart && textPart.type === 'text') {
+                             textPart.text += fileContext;
+                         } else {
+                             // If no existing text part, create one
+                             contentParts.push({ type: 'text', text: fileContext });
+                         }
+                     }
+                 });
+                 apiMsg.content = contentParts;
+             } else {
+                 apiMsg.content = m.text;
+             }
         }
+        return apiMsg;
+    });
+
+    // 4. Robust Context Pruning & Sanitization
+    
+    const MAX_CONTEXT_MESSAGES = 12; // Reduced to keep topology safer and faster
+    let messagesToSend: OpenAIMessage[] = [];
+    
+    // Always keep system msg
+    // Slice only the chat history
+    if (apiHistory.length > MAX_CONTEXT_MESSAGES) {
+        messagesToSend = apiHistory.slice(apiHistory.length - MAX_CONTEXT_MESSAGES);
+    } else {
+        messagesToSend = [...apiHistory];
     }
 
-    // B. Strict User/System-Start Policy (Forward Sanitization)
-    // We iterate from the start of our slice and discard messages until we find a 'user' or 'system' message.
-    // This effectively drops any orphaned 'tool' results or 'assistant' messages that were cut off from their context.
-    
-    while (messagesToSend.length > 0) {
-        const r = messagesToSend[0].role;
-        // Accepted start roles
-        if (r === 'user' || r === 'system') {
-            break;
-        }
-        // Rejected start roles (Tool results without calls, or Assistant messages potentially part of a chain)
-        // Note: Assistant starting is technically allowed by API, but removing them ensures we don't start with a Tool Call that has no Tool Result (if we cut strangely), or vice versa.
-        // Starting with User is the safest conversational state.
-        messagesToSend.shift();
-    }
-    
-    // C. Combine All
-    const finalMessages = [systemMsg, ...messagesToSend, lastUserMsg];
+    // 5. SANITIZE: Remove orphans and fix hanging tool calls to prevent 500 Errors
+    // We prepend systemMsg *before* sanitizing to ensure the whole chain is valid, 
+    // although system msg doesn't affect tool topology usually.
+    messagesToSend = sanitizeMessageHistory([systemMsg, ...messagesToSend]);
 
     const payload = {
-        model: settings.chatModel || "gpt-3.5-turbo",
-        messages: finalMessages,
+        model: settings.model || settings.chatModel || "gpt-3.5-turbo",
+        messages: messagesToSend,
         temperature: 0.5, 
         stream: true,
         tool_choice: "auto", 
@@ -528,7 +663,7 @@ export async function* generateChatStream(
                     parameters: {
                         type: "object",
                         properties: {
-                            query: { type: "string", description: "The TCM keyword (e.g., '白芍', '活血化瘀') to search for. Do NOT use Western disease names like 'LDL-C'." }
+                            query: { type: "string", description: "The TCM keyword to search for." }
                         },
                         required: ["query"]
                     }
@@ -538,7 +673,7 @@ export async function* generateChatStream(
                 type: "function",
                 function: {
                     name: "update_prescription",
-                    description: "User wants to modify the prescription (add/remove herbs, change dosage)",
+                    description: "User wants to modify the prescription",
                     parameters: {
                         type: "object",
                         properties: {
@@ -552,11 +687,11 @@ export async function* generateChatStream(
                 type: "function",
                 function: {
                     name: "regenerate_report",
-                    description: "User wants to regenerate the analysis report with specific instructions",
+                    description: "User wants to regenerate the analysis report",
                     parameters: {
                         type: "object",
                         properties: {
-                            instructions: { type: "string", description: "Specific instructions for regeneration" }
+                            instructions: { type: "string", description: "Specific instructions" }
                         },
                         required: ["instructions"]
                     }
@@ -566,11 +701,11 @@ export async function* generateChatStream(
                 type: "function",
                 function: {
                     name: "update_meta_info",
-                    description: "Update the patient's medical record (Meta Info) based on new findings, symptoms, or corrections provided in the chat. Use this to maintain an evolving patient context.",
+                    description: "Update the patient's medical record (Meta Info).",
                     parameters: {
                         type: "object",
                         properties: {
-                            new_info: { type: "string", description: "The updated and consolidated medical record text. Should include patient background, main complaints, and key symptoms." }
+                            new_info: { type: "string", description: "The updated medical record text." }
                         },
                         required: ["new_info"]
                     }
@@ -588,7 +723,7 @@ export async function* generateChatStream(
 
     if (!res.ok) {
         const err = await res.text();
-        throw new Error(`Chat Stream Failed: ${res.status} ${res.statusText} - ${err.substring(0, 100)}`);
+        throw new Error(`Chat Stream Failed: ${res.status} - ${err}`);
     }
 
     if (!res.body) return;
@@ -619,8 +754,8 @@ export async function* generateChatStream(
                     
                     if (delta.content) {
                         let cleanText = delta.content;
+                        // Basic cleanup, though usually handled by frontend
                         if (cleanText.includes("```html")) cleanText = cleanText.replace("```html", "");
-                        if (cleanText.includes("```")) cleanText = cleanText.replace("```", "");
                         
                         yield { text: cleanText };
                     }

@@ -1,6 +1,4 @@
 
-
-
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { AISettings, BenCaoHerb, CloudReport, CloudChatSession } from '../types';
 
@@ -298,13 +296,17 @@ export const saveCloudChatSession = async (session: CloudChatSession, settings: 
             .upsert(payload);
 
         if (error) {
+            // Enhanced Error Logging for Schema Mismatch
             console.error("Error saving chat session:", error.message);
-            return false;
+            if (error.message.includes('meta_info')) {
+                console.error("CRITICAL SCHEMA ERROR: 'meta_info' column missing in 'chat_sessions' table. Please run the SQL update script.");
+            }
+            throw new Error(error.message); // Throw to let caller log it
         }
         return true;
-    } catch (e) {
-        console.error("Supabase chat save exception:", e);
-        return false;
+    } catch (e: any) {
+        // Rethrow for UI handling
+        throw e;
     }
 };
 
@@ -314,8 +316,10 @@ export const deleteCloudChatSession = async (id: string, settings: AISettings): 
     
     try {
         const { error } = await client.from('chat_sessions').delete().eq('id', id);
-        return !error;
+        if (error) throw error;
+        return true;
     } catch(e) {
+        console.error("Error deleting session:", e);
         return false;
     }
 };

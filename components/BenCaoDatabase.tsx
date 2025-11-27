@@ -1,5 +1,4 @@
 
-
 import React, { useState, useMemo, useEffect } from 'react';
 import { BenCaoHerb, AISettings } from '../types';
 import { FULL_HERB_LIST, HERB_ALIASES, loadCustomHerbs } from '../data/herbDatabase'; 
@@ -194,6 +193,16 @@ create policy "Public delete access" on herbs for delete using (true);`;
       alert("SQL 代码已复制！请前往 Supabase Dashboard -> SQL Editor 粘贴运行。");
   };
 
+  // Switch herb logic for detail modal
+  const handleSwitchHerb = (herbName: string) => {
+      const found = FULL_HERB_LIST.find(h => h.name === herbName);
+      if (found) {
+          setSelectedHerb(found);
+      } else {
+          alert(`未找到 "${herbName}" 的详细数据`);
+      }
+  };
+
   return (
     <div className="w-full h-full min-h-[80vh] flex flex-col gap-6 animate-in fade-in relative font-sans">
       
@@ -361,13 +370,13 @@ create policy "Public delete access" on herbs for delete using (true);`;
         )}
       </div>
 
-      {/* Detail Modal with Edit/Delete Handlers */}
+      {/* Detail Modal with Switch/Edit/Delete Handlers */}
       {selectedHerb && (
         <HerbDetailModal 
             herb={selectedHerb} 
             onClose={() => setSelectedHerb(null)} 
             onEdit={(h) => handleEditHerb(h)}
-            // onDelete is removed
+            onSwitch={handleSwitchHerb}
         />
       )}
       

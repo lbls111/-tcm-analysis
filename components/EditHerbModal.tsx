@@ -1,7 +1,9 @@
 
 import React, { useState } from 'react';
-import { BenCaoHerb } from '../types';
+import { BenCaoHerb, AISettings } from '../types';
 import { BEN_CAO_NATURES, BEN_CAO_FLAVORS, BEN_CAO_PROCESSING } from '../data/benCaoData';
+import { generateHerbDataWithAI } from '../services/openaiService';
+import { DEFAULT_SUPABASE_URL, DEFAULT_SUPABASE_KEY } from '../constants';
 
 interface Props {
   herb: BenCaoHerb;
@@ -12,6 +14,7 @@ interface Props {
 
 export const EditHerbModal: React.FC<Props> = ({ herb, onClose, onSave, isSaving }) => {
   const [formData, setFormData] = useState<BenCaoHerb>({ ...herb });
+  const [isAiLoading, setIsAiLoading] = useState(false);
 
   const handleSave = () => {
     onSave(formData);
@@ -24,6 +27,40 @@ export const EditHerbModal: React.FC<Props> = ({ herb, onClose, onSave, isSaving
     } else {
       setFormData({ ...formData, flavors: [...currentFlavors, flavor] });
     }
+  };
+
+  const handleAiAutoFill = async () => {
+      const savedSettings = localStorage.getItem("logicmaster_ai_settings");
+      let settings: AISettings = savedSettings ? JSON.parse(savedSettings) : {};
+      
+      if (!settings.apiKey) {
+          alert("请先在首页配置 API Key，才能使用 AI 补全功能。");
+          return;
+      }
+
+      setIsAiLoading(true);
+      try {
+          const aiData = await generateHerbDataWithAI(formData.name, settings);
+          if (aiData) {
+              setFormData({
+                  ...formData,
+                  nature: aiData.nature,
+                  flavors: aiData.flavors,
+                  meridians: aiData.meridians,
+                  efficacy: aiData.efficacy,
+                  usage: aiData.usage,
+                  category: aiData.category,
+                  processing: aiData.processing
+              });
+              alert(`AI 补全成功！\n已更新【${formData.name}】的性味、归经与功能主治。\n请特别检查炮制品的功效描述。`);
+          } else {
+              alert("AI 无法生成数据，请检查药名是否正确。");
+          }
+      } catch (e: any) {
+          alert(`AI 请求失败: ${e.message}`);
+      } finally {
+          setIsAiLoading(false);
+      }
   };
 
   return (
@@ -44,12 +81,22 @@ export const EditHerbModal: React.FC<Props> = ({ herb, onClose, onSave, isSaving
            <div className="grid grid-cols-2 gap-4">
               <div>
                  <label className="block text-xs font-bold text-slate-500 mb-1">药名 (Name)</label>
-                 <input 
-                   type="text" 
-                   value={formData.name} 
-                   onChange={e => setFormData({...formData, name: e.target.value})}
-                   className="w-full p-3 border border-slate-200 rounded-lg font-bold text-slate-800 focus:ring-2 focus:ring-indigo-500 outline-none"
-                 />
+                 <div className="flex gap-2">
+                     <input 
+                       type="text" 
+                       value={formData.name} 
+                       onChange={e => setFormData({...formData, name: e.target.value})}
+                       className="flex-1 p-3 border border-slate-200 rounded-lg font-bold text-slate-800 focus:ring-2 focus:ring-indigo-500 outline-none"
+                     />
+                     <button
+                        onClick={handleAiAutoFill}
+                        disabled={isAiLoading || !formData.name}
+                        className="px-3 rounded-lg bg-indigo-50 text-indigo-600 hover:bg-indigo-100 border border-indigo-200 text-xs font-bold whitespace-nowrap transition-colors flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
+                        title="使用 AI 根据药名自动填充所有字段"
+                     >
+                        {isAiLoading ? <span className="animate-spin">⏳</span> : '✨'} AI补全
+                     </button>
+                 </div>
               </div>
               <div>
                  <label className="block text-xs font-bold text-slate-500 mb-1">分类/来源 (Category)</label>
