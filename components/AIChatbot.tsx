@@ -294,6 +294,7 @@ export const AIChatbot: React.FC<Props> = ({
   const [isSavingCloud, setIsSavingCloud] = useState(false);
   const [showMetaModal, setShowMetaModal] = useState(false);
   const [viewingReference, setViewingReference] = useState<{type: 'report' | 'meta', content: string} | null>(null);
+  const [tokenCount, setTokenCount] = useState<number>(0);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -309,6 +310,17 @@ export const AIChatbot: React.FC<Props> = ({
       const escaped = validNames.map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
       return new RegExp(`(${escaped.join('|')})`, 'g');
   }, [FULL_HERB_LIST.length]);
+
+  // Helper: Estimate Token Count (Roughly 1 token ~= 4 chars for English, 1 char for Chinese)
+  const estimateTokens = (msgs: Message[]) => {
+     let totalChars = 0;
+     msgs.forEach(m => {
+         totalChars += m.text.length;
+         if (m.toolCalls) totalChars += JSON.stringify(m.toolCalls).length;
+     });
+     // Simple heuristic: 0.8 tokens per char average mixed
+     return Math.round(totalChars * 0.8) + 100; // Base overhead
+  };
 
   // --- Data Loading & Persistence ---
   useEffect(() => {
@@ -390,6 +402,10 @@ export const AIChatbot: React.FC<Props> = ({
     }
     if (activeSessionId) {
       localStorage.setItem('logicmaster_last_active_session', activeSessionId);
+      
+      // Update Token Count
+      const msgs = sessions[activeSessionId]?.messages || [];
+      setTokenCount(estimateTokens(msgs));
     }
     
     // Cloud Sync Logic (Debounce needed in real world, but for now we sync active session)
@@ -533,11 +549,50 @@ export const AIChatbot: React.FC<Props> = ({
     }
   };
 
+  // Improved Delete Handler: Cascade Delete Hidden Tool Messages
   const handleDeleteMessage = (index: number) => {
     if (!activeSessionId) return;
     setSessions(prev => {
       const sess = { ...prev[activeSessionId] };
-      sess.messages = sess.messages.filter((_, i) => i !== index);
+      const indicesToRemove = new Set<number>();
+      
+      // 1. Mark target message for removal
+      indicesToRemove.add(index);
+      
+      // 2. Cascade Backward: Remove hidden Tool messages leading up to this one
+      // (e.g., if we delete a Model Response, we should remove the hidden Tool Result and Tool Call preceding it)
+      let curr = index - 1;
+      while (curr >= 0) {
+          const m = sess.messages[curr];
+          // Check if message is hidden (Tool Result OR Model Call with no text)
+          const isHiddenToolRes = m.role === 'tool'; 
+          const isHiddenToolCall = m.role === 'model' && !m.text && m.toolCalls && m.toolCalls.length > 0;
+          
+          if (isHiddenToolRes || isHiddenToolCall) {
+              indicesToRemove.add(curr);
+              curr--;
+          } else {
+              // Stop when we hit a visible message
+              break;
+          }
+      }
+      
+      // 3. Cascade Forward: (Optional) If we delete a Tool Call, delete the Tool Result?
+      // Generally user deletes visible messages, which are mostly Text.
+      // But if user deletes a visible message that had tool_calls attached (rare but possible if text exists),
+      // we should delete the subsequent 'tool' result.
+      curr = index + 1;
+      while (curr < sess.messages.length) {
+          const m = sess.messages[curr];
+          if (m.role === 'tool') {
+              indicesToRemove.add(curr);
+              curr++;
+          } else {
+              break;
+          }
+      }
+
+      sess.messages = sess.messages.filter((_, i) => !indicesToRemove.has(i));
       return { ...prev, [activeSessionId]: sess };
     });
   };
@@ -943,8 +998,11 @@ export const AIChatbot: React.FC<Props> = ({
                   className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-5 py-4 text-base focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 outline-none resize-none shadow-inner transition-all disabled:bg-slate-100 disabled:text-slate-400 font-sans"
                   rows={1}
                 />
-                <div className="absolute right-3 bottom-3 text-[10px] text-slate-400 font-medium bg-white/50 px-2 rounded pointer-events-none">
-                   支持 HTML
+                <div className="absolute right-3 bottom-3 flex items-center gap-3 pointer-events-none">
+                     <div className="text-[10px] text-slate-400 font-medium bg-white/50 px-2 rounded flex items-center gap-1">
+                        <span>💬</span> 
+                        {tokenCount > 0 ? `上下文: ~${tokenCount} tokens` : 'HTML 支持'}
+                     </div>
                 </div>
               </div>
               
