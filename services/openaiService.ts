@@ -1,6 +1,3 @@
-
-
-
 import { AnalysisResult, AISettings, ModelOption, BenCaoHerb } from "../types";
 
 // ==========================================
@@ -425,8 +422,6 @@ export async function* analyzePrescriptionWithAI(
                         const json = JSON.parse(dataStr);
                         const chunk = json.choices[0]?.delta?.content;
                         if (chunk) {
-                            // Strip markdown code blocks on the fly if they appear
-                            // This is a simple safeguard. Better handling might be needed for complex cases.
                             let cleanChunk = chunk;
                             if (cleanChunk.includes("```html")) cleanChunk = cleanChunk.replace("```html", "");
                             if (cleanChunk.includes("```")) cleanChunk = cleanChunk.replace("```", "");
@@ -445,7 +440,7 @@ export async function* analyzePrescriptionWithAI(
 };
 
 /**
- * Chat Stream Generation with Context Management (Compression/Pruning)
+ * Chat Stream Generation with Safe Context Management
  */
 export async function* generateChatStream(
     history: OpenAIMessage[],
@@ -458,68 +453,72 @@ export async function* generateChatStream(
 ): AsyncGenerator<{ text?: string, functionCalls?: {id: string, name: string, args: any}[] }, void, unknown> {
     const url = `${getBaseUrl(settings.apiBaseUrl)}/chat/completions`;
     
-    // Safety Truncate Report Content to prevent context overflow before compression kicks in
-    // Limit report to ~15,000 characters
-    const MAX_REPORT_CHARS = 15000;
+    // 1. Safety Truncate Large Contexts (Report & Meta)
+    // Limits help ensure we don't send malformed large payloads
+    const MAX_REPORT_CHARS = 10000;
     const safeReportContent = reportContent && reportContent.length > MAX_REPORT_CHARS 
         ? reportContent.slice(0, MAX_REPORT_CHARS) + "\n\n[...System Note: Report truncated due to length limits...]"
-        : reportContent;
+        : (reportContent || "");
 
-    // 1. Build System Message
+    const MAX_META_CHARS = 5000;
+    const safeMetaInfo = metaInfo && metaInfo.length > MAX_META_CHARS
+        ? metaInfo.slice(0, MAX_META_CHARS) + "\n...[truncated]"
+        : metaInfo;
+
+    // 2. Build System Message
     const systemMsg: OpenAIMessage = {
         role: "system",
-        content: CHAT_SYSTEM_INSTRUCTION(analysis, prescription, safeReportContent, metaInfo)
+        content: CHAT_SYSTEM_INSTRUCTION(analysis, prescription, safeReportContent, safeMetaInfo)
     };
 
-    // 2. Implement Token Context Management (Heuristic Compression)
-    // Threshold: ~300,000 characters (approx 120k tokens safe margin for high-end models)
-    const MAX_CONTEXT_CHARS = 300000; 
+    // 3. Robust Context Pruning Algorithm
+    // Goal: Fit within context limits WITHOUT breaking Tool Call Chains.
+    // Broken chain (e.g. Tool message without preceding Assistant call) causes 500/400 errors.
     
-    // Always keep system message and the very last user message to ensure continuity
-    const lastUserMsg = history[history.length - 1];
-    const previousHistory = history.slice(0, history.length - 1);
+    const MAX_CONTEXT_CHARS = 200000; // Heuristic limit for history
+    const lastUserMsg = history[history.length - 1]; // Always keep the latest trigger
+    const previousHistory = history.slice(0, history.length - 1); // Candidates for pruning
     
-    let processedHistory: OpenAIMessage[] = [...previousHistory];
-    
-    // Calculate total length (rough approximation)
-    let currentLength = JSON.stringify(processedHistory).length + JSON.stringify(systemMsg).length + JSON.stringify(lastUserMsg).length;
-    
-    if (currentLength > MAX_CONTEXT_CHARS) {
-        console.warn(`Context length ${currentLength} exceeds limit ${MAX_CONTEXT_CHARS}. Pruning history...`);
-        
-        // Strategy: Keep recent N messages until we are safe.
-        // We iterate backwards and accumulate messages until we hit the limit.
-        const retainedMessages: OpenAIMessage[] = [];
-        let accumulatedLen = 0;
-        
-        // Reverse iterate
-        for (let i = previousHistory.length - 1; i >= 0; i--) {
-            const msgLen = JSON.stringify(previousHistory[i]).length;
-            if (accumulatedLen + msgLen < (MAX_CONTEXT_CHARS * 0.7)) { // Use 70% of budget for history
-                retainedMessages.unshift(previousHistory[i]);
-                accumulatedLen += msgLen;
-            } else {
-                break; // Stop adding older messages
-            }
-        }
-        
-        // Inject a system note indicating compression
-        if (retainedMessages.length < previousHistory.length) {
-            const compressionNote: OpenAIMessage = {
-                role: "system",
-                content: `[System Note: Context compressed. The earliest ${previousHistory.length - retainedMessages.length} messages were removed to save memory.]`
-            };
-            processedHistory = [compressionNote, ...retainedMessages];
+    let messagesToSend: OpenAIMessage[] = [];
+    let currentLength = 0;
+
+    // A. Iterate BACKWARDS to keep most recent context
+    for (let i = previousHistory.length - 1; i >= 0; i--) {
+        const msg = previousHistory[i];
+        const len = JSON.stringify(msg).length;
+
+        if (currentLength + len < MAX_CONTEXT_CHARS) {
+            messagesToSend.unshift(msg);
+            currentLength += len;
         } else {
-            processedHistory = retainedMessages;
+            // Context full
+            break;
         }
     }
 
-    const messages = [systemMsg, ...processedHistory, lastUserMsg];
+    // B. Sanitize the START of the conversation to prevent Orphan Tools
+    // Rule: The conversation (after system prompt) cannot start with a 'tool' role.
+    // It must start with 'user' or 'assistant'.
+    // Also, if it starts with 'assistant' that has tool_calls, but we pruned the tool results? (Unlikely in backward iteration)
+    // The main risk is cutting off the 'assistant' that CALLED the tool, leaving a 'tool' result as the first message.
+    
+    while (messagesToSend.length > 0) {
+        const firstMsg = messagesToSend[0];
+        if (firstMsg.role === 'tool') {
+            console.warn("[SafePruning] Dropping orphan tool message at start of context.");
+            messagesToSend.shift();
+        } else {
+            // Found a valid start node
+            break;
+        }
+    }
+    
+    // C. Combine All
+    const finalMessages = [systemMsg, ...messagesToSend, lastUserMsg];
 
     const payload = {
         model: settings.chatModel || "gpt-3.5-turbo",
-        messages: messages,
+        messages: finalMessages,
         temperature: 0.5, 
         stream: true,
         tool_choice: "auto", 
@@ -592,7 +591,7 @@ export async function* generateChatStream(
 
     if (!res.ok) {
         const err = await res.text();
-        throw new Error(`Chat Stream Failed: ${res.status} ${res.statusText}`);
+        throw new Error(`Chat Stream Failed: ${res.status} ${res.statusText} - ${err.substring(0, 100)}`);
     }
 
     if (!res.body) return;
@@ -622,7 +621,6 @@ export async function* generateChatStream(
                     const delta = json.choices[0].delta;
                     
                     if (delta.content) {
-                        // Strip Markdown code blocks if AI disobeys
                         let cleanText = delta.content;
                         if (cleanText.includes("```html")) cleanText = cleanText.replace("```html", "");
                         if (cleanText.includes("```")) cleanText = cleanText.replace("```", "");

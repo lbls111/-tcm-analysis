@@ -1,6 +1,3 @@
-
-
-
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { generateChatStream, OpenAIMessage, OpenAIToolCall, summarizeMessages } from '../services/openaiService';
 import { AnalysisResult, AISettings } from '../types';
@@ -128,38 +125,29 @@ const ChatMessageItem: React.FC<MessageItemProps> = ({
       }
   };
 
-  // Advanced HTML Processing:
-  // 1. Replace [[Citation]] markers
-  // 2. Auto-highlight herbs using regex (outside of existing tags)
-  // 3. Add styling classes to basic HTML tags
   const processHtml = (html: string) => {
       if (!html) return '';
       
       let processed = html;
-
-      // --- Step 0: Remove potential Markdown Code Blocks ---
       processed = processed.replace(/```html/g, '').replace(/```/g, '');
 
-      // --- Step 1: Citations ---
+      // Citations
       processed = processed
           .replace(/\[\[AI报告\]\]/g, '<span class="citation-link cursor-pointer inline-flex items-center gap-1 mx-1 px-1.5 py-0.5 rounded text-xs font-bold bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100 transition-all select-none" data-citation="report">📑 AI报告</span>')
           .replace(/\[\[元信息\]\]/g, '<span class="citation-link cursor-pointer inline-flex items-center gap-1 mx-1 px-1.5 py-0.5 rounded text-xs font-bold bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 transition-all select-none" data-citation="meta">🧠 元信息</span>');
 
-      // --- Step 2: Herb Highlighting (Robust Regex on TEXT nodes only to avoid breaking HTML attributes) ---
-      // Simple Split strategy works well for well-formed tags
+      // Herb Highlighting
       if (herbRegex) {
           const parts = processed.split(/(<[^>]+>)/g);
           processed = parts.map(part => {
-              // If it's an HTML tag, leave it alone
               if (part.startsWith('<')) return part;
-              // Otherwise, replace herb names
               return part.replace(herbRegex, (match) => 
                   `<span class="herb-link cursor-pointer inline-flex items-center gap-0.5 mx-0.5 px-1 py-0 rounded-sm text-indigo-700 font-bold border-b border-indigo-200 hover:bg-indigo-50 hover:border-indigo-500 transition-colors" data-herb="${match}">${match}</span>`
               );
           }).join('');
       }
       
-      // --- Step 3: Inject Styles for Standard Tags ---
+      // Basic Styling
       processed = processed.replace(/<table>/g, '<div class="overflow-x-auto my-3 border border-slate-200 rounded-lg"><table class="w-full text-sm border-collapse">');
       processed = processed.replace(/<\/table>/g, '</table></div>');
       processed = processed.replace(/<th>/g, '<th class="bg-slate-50 text-slate-600 font-bold px-4 py-2 text-left border-b border-slate-200 whitespace-nowrap">');
@@ -170,35 +158,36 @@ const ChatMessageItem: React.FC<MessageItemProps> = ({
       return processed;
   };
 
-  // Hide Tool Messages entirely from the main flow
+  // Hide Tool Messages
   if (message.role === 'tool') {
       return null;
   }
   
-  // Hide AI messages that ONLY contain tool calls
+  // Hide empty AI tool calls
   if (message.role === 'model' && !message.text && message.toolCalls && message.toolCalls.length > 0) {
       return null;
   }
 
-  // System Summary Message (Compressed History)
+  // System Summary Message (Hidden style)
   if (message.role === 'system') {
       return (
-          <div className="flex justify-center my-6">
-              <div className="bg-slate-100 text-slate-500 text-xs px-4 py-2 rounded-full border border-slate-200 flex items-center gap-2">
-                  <span>🗜️</span> {message.text}
-              </div>
+          <div className="flex items-center justify-center gap-4 my-8 opacity-60 hover:opacity-100 transition-opacity select-none group">
+               <div className="h-px bg-slate-200 flex-1 group-hover:bg-indigo-200 transition-colors"></div>
+               <span className="text-[10px] text-slate-400 font-medium uppercase tracking-wider bg-white px-2 group-hover:text-indigo-400 transition-colors flex items-center gap-2">
+                  <span>🗜️</span> 
+                  {message.text.includes('摘要') ? '历史对话已压缩 (Summary)' : 'System Notice'}
+               </span>
+               <div className="h-px bg-slate-200 flex-1 group-hover:bg-indigo-200 transition-colors"></div>
           </div>
       );
   }
 
   return (
     <div className={`flex items-start gap-4 ${message.role === 'user' ? 'flex-row-reverse' : 'flex-row'} group mb-6 animate-in fade-in slide-in-from-bottom-2`}>
-      {/* Avatar */}
       <div className={`w-10 h-10 rounded-full flex-shrink-0 flex items-center justify-center text-sm font-bold shadow-sm border border-white/50 ${message.role === 'user' ? 'bg-indigo-600 text-white' : 'bg-white text-indigo-600 border-indigo-100'}`}>
         {message.role === 'user' ? '您' : 'AI'}
       </div>
 
-      {/* Content Bubble */}
       <div className={`flex flex-col ${message.role === 'user' ? 'items-end' : 'items-start'} max-w-[95%] lg:max-w-[85%]`}>
         
         {isEditing ? (
@@ -209,18 +198,8 @@ const ChatMessageItem: React.FC<MessageItemProps> = ({
               className="w-full h-32 p-2 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-indigo-100 resize-none font-mono"
             />
             <div className="flex justify-end gap-2 mt-3">
-              <button 
-                onClick={() => setIsEditing(false)} 
-                className="px-3 py-1.5 text-xs text-slate-500 hover:bg-slate-100 rounded-md font-bold transition-colors"
-              >
-                取消
-              </button>
-              <button 
-                onClick={handleSaveEdit} 
-                className="px-3 py-1.5 text-xs bg-indigo-600 text-white rounded-md hover:bg-indigo-700 shadow-md transition-colors font-bold"
-              >
-                {message.role === 'user' ? '保存并重新发送' : '保存修改'}
-              </button>
+              <button onClick={() => setIsEditing(false)} className="px-3 py-1.5 text-xs text-slate-500 hover:bg-slate-100 rounded-md font-bold">取消</button>
+              <button onClick={handleSaveEdit} className="px-3 py-1.5 text-xs bg-indigo-600 text-white rounded-md hover:bg-indigo-700 shadow-md font-bold">保存</button>
             </div>
           </div>
         ) : (
@@ -242,12 +221,10 @@ const ChatMessageItem: React.FC<MessageItemProps> = ({
                 />
              )}
              
-             {/* Continue Button for truncated AI responses */}
              {message.role === 'model' && isLast && !isLoading && (
                  <button 
                     onClick={onContinue}
                     className="mt-4 text-xs bg-indigo-50 text-indigo-700 px-4 py-2 rounded-full border border-indigo-200 hover:bg-indigo-100 font-bold flex items-center gap-2 transition-all"
-                    title="如果回答未显示完整，点击继续"
                  >
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-3 h-3"><path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" /></svg>
                     继续生成
@@ -256,7 +233,6 @@ const ChatMessageItem: React.FC<MessageItemProps> = ({
           </div>
         )}
 
-        {/* Action Toolbar */}
         {!isEditing && !isLoading && (
           <div className={`flex items-center gap-1 mt-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200 ${message.role === 'user' ? 'justify-end pr-1' : 'justify-start pl-1'}`}>
              <ActionButton icon="📋" label={copyStatus === 'copied' ? '已复制' : '复制文本'} onClick={handleCopy} />
@@ -311,36 +287,32 @@ export const AIChatbot: React.FC<Props> = ({
   const [viewingReference, setViewingReference] = useState<{type: 'report' | 'meta', content: string} | null>(null);
   const [tokenCount, setTokenCount] = useState<number>(0);
   const [isCompressing, setIsCompressing] = useState(false);
+  const [showScrollButton, setShowScrollButton] = useState(false);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const messageCountRef = useRef(0);
 
-  // Memoized Herb Regex (Same as App.tsx)
   const herbRegex = useMemo(() => {
       const names = FULL_HERB_LIST.map(h => h.name).sort((a, b) => b.length - a.length);
       if (names.length === 0) return null;
-      // Filter short common words that might cause false positives if not careful, though sorting by length helps
       const validNames = names.filter(n => n.length >= 1); 
       const escaped = validNames.map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
       return new RegExp(`(${escaped.join('|')})`, 'g');
   }, [FULL_HERB_LIST.length]);
 
-  // Helper: Estimate Token Count (Roughly 1 token ~= 4 chars for English, 1 char for Chinese)
   const estimateTokens = (msgs: Message[]) => {
      let totalChars = 0;
      msgs.forEach(m => {
          totalChars += m.text.length;
          if (m.toolCalls) totalChars += JSON.stringify(m.toolCalls).length;
      });
-     // Simple heuristic: 0.8 tokens per char average mixed
-     return Math.round(totalChars * 0.8) + 100; // Base overhead
+     return Math.round(totalChars * 0.8) + 100;
   };
 
-  // --- Data Loading & Persistence ---
   useEffect(() => {
-    // 1. Try Load from Cloud first (if key exists)
     const init = async () => {
         let loadedFromCloud = false;
         if (settings.supabaseKey) {
@@ -357,7 +329,6 @@ export const AIChatbot: React.FC<Props> = ({
                 });
                 setSessions(sessionMap);
                 setActiveSessionId(cloudSessions[0].id);
-                // Load meta info from latest session if available
                 if (cloudSessions[0].meta_info) {
                     onUpdateMetaInfo(cloudSessions[0].meta_info);
                 }
@@ -366,7 +337,6 @@ export const AIChatbot: React.FC<Props> = ({
         }
 
         if (!loadedFromCloud) {
-             // 2. Fallback to LocalStorage
             try {
                 const saved = localStorage.getItem(LS_CHAT_SESSIONS_KEY);
                 if (saved) {
@@ -387,7 +357,6 @@ export const AIChatbot: React.FC<Props> = ({
             }
         }
         
-        // 3. Ensure at least one session exists
         setSessions(current => {
             if (Object.keys(current).length === 0) {
                  const newId = `session_${Date.now()}`;
@@ -398,7 +367,6 @@ export const AIChatbot: React.FC<Props> = ({
                     messages: [{ role: 'model', text: '我是您的 AI 中医助手。我可以帮您分析处方，或查阅药典数据。请问您想了解什么？' }],
                  };
                  setActiveSessionId(newId);
-                 // Sync new session to cloud immediately if connected
                  if (settings.supabaseKey) {
                      saveCloudChatSession({
                          id: newSession.id,
@@ -413,31 +381,26 @@ export const AIChatbot: React.FC<Props> = ({
         });
     };
     init();
-  }, [settings.supabaseKey]); // Re-run when key changes
+  }, [settings.supabaseKey]);
 
-  // Save to LocalStorage & Cloud on change
   useEffect(() => {
     if (Object.keys(sessions).length > 0) {
       localStorage.setItem(LS_CHAT_SESSIONS_KEY, JSON.stringify(sessions));
     }
     if (activeSessionId) {
       localStorage.setItem('logicmaster_last_active_session', activeSessionId);
-      
-      // Update Token Count
       const msgs = sessions[activeSessionId]?.messages || [];
       setTokenCount(estimateTokens(msgs));
     }
     
-    // Cloud Sync Logic (Debounce needed in real world, but for now we sync active session)
     if (activeSessionId && sessions[activeSessionId] && settings.supabaseKey) {
         const sess = sessions[activeSessionId];
-        // Only sync if messages > 1 (not just welcome msg)
         if (sess.messages.length > 1) {
              saveCloudChatSession({
                  id: sess.id,
                  title: sess.title,
                  messages: sess.messages,
-                 meta_info: metaInfo, // Sync current meta info with session
+                 meta_info: metaInfo,
                  created_at: sess.createdAt
              }, settings).catch(e => console.error("Cloud sync failed", e));
         }
@@ -445,38 +408,22 @@ export const AIChatbot: React.FC<Props> = ({
 
   }, [sessions, activeSessionId, settings, metaInfo]);
 
-  // === Context Compression (Auto Summary) Logic ===
-  // Note: Disabled automatic compression in favor of manual modal as per user request, 
-  // but kept logic available for manual invocation.
-  
   const performCompression = async (keepCount: number = 10) => {
       if (!activeSessionId || !sessions[activeSessionId]) return;
-      
       const currentMessages = sessions[activeSessionId].messages;
       const totalLen = currentMessages.length;
-      
-      // Keep index 0 (Welcome). 
-      // Keep last `keepCount` messages.
-      // Summarize everything in betweeen.
-      // [0] ... [Summary Range] ... [Total - keepCount ... Total]
-      
-      // Check if we have enough messages to compress
       if (totalLen <= keepCount + 1) return; 
 
       setIsCompressing(true);
       try {
-          const startIndex = 1; // Skip welcome
-          const endIndex = totalLen - keepCount; // Exclusive
+          const startIndex = 1; 
+          const endIndex = totalLen - keepCount; 
 
           const toSummarize = currentMessages.slice(startIndex, endIndex);
-          
           if (toSummarize.length === 0) return;
 
-          // Convert to OpenAI format
           const apiMsgs = toSummarize.map(m => {
-             // We can treat system summary as system
              if(m.role === 'system') return { role: 'system' as const, content: m.text };
-             // Tool/Model/User mapping
              if(m.role === 'tool') return { role: 'tool' as const, content: m.text, tool_call_id: m.toolCallId };
              if(m.role === 'model') return { role: 'assistant' as const, content: m.text, tool_calls: m.toolCalls };
              return { role: 'user' as const, content: m.text };
@@ -486,11 +433,8 @@ export const AIChatbot: React.FC<Props> = ({
           if (summaryText) {
               setSessions(prev => {
                   const sess = { ...prev[activeSessionId] };
-                  // Tail part
                   const tail = sess.messages.slice(endIndex);
-                  // Insert summary
                   const summaryMsg: Message = { role: 'system', text: summaryText };
-                  // Result: [Welcome, Summary, ...Tail]
                   sess.messages = [sess.messages[0], summaryMsg, ...tail];
                   return { ...prev, [activeSessionId]: sess };
               });
@@ -503,14 +447,28 @@ export const AIChatbot: React.FC<Props> = ({
       }
   };
 
-  // === Scroll Logic Optimized (Disable Follow Output) ===
   useEffect(() => {
     const currentMsgs = activeSessionId ? sessions[activeSessionId]?.messages || [] : [];
+    // Only auto-scroll on new messages if we are close to bottom or it's a new message event
     if (messageCountRef.current !== currentMsgs.length) {
-        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+        scrollToBottom();
         messageCountRef.current = currentMsgs.length;
     }
   }, [sessions, activeSessionId]); 
+
+  const scrollToBottom = () => {
+      if (messagesEndRef.current) {
+          messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
+      }
+  };
+
+  // Handle scroll event for "Jump to Bottom" button
+  const handleScroll = () => {
+      if (!messagesContainerRef.current) return;
+      const { scrollTop, scrollHeight, clientHeight } = messagesContainerRef.current;
+      const isNearBottom = scrollHeight - scrollTop - clientHeight < 200;
+      setShowScrollButton(!isNearBottom);
+  };
 
   useEffect(() => {
     if (textareaRef.current) {
@@ -519,7 +477,6 @@ export const AIChatbot: React.FC<Props> = ({
     }
   }, [input]);
 
-  // --- Session Logic ---
   const createNewSession = () => {
     const newId = `session_${Date.now()}`;
     const newSession: Session = {
@@ -530,7 +487,6 @@ export const AIChatbot: React.FC<Props> = ({
     };
     setSessions(prev => ({ ...prev, [newId]: newSession }));
     setActiveSessionId(newId);
-    
     if (settings.supabaseKey) {
          saveCloudChatSession({
              id: newSession.id,
@@ -549,7 +505,6 @@ export const AIChatbot: React.FC<Props> = ({
           alert("保存失败：未配置 Supabase 连接。");
           return;
       }
-      
       setIsSavingCloud(true);
       const sess = sessions[activeSessionId];
       const success = await saveCloudChatSession({
@@ -559,27 +514,22 @@ export const AIChatbot: React.FC<Props> = ({
           meta_info: metaInfo,
           created_at: sess.createdAt
       }, settings);
-      
       setIsSavingCloud(false);
-      
       if (success) {
           alert("☁️ 会话已同步到云端数据库。");
       } else {
-          alert("❌ 同步失败。\n请确认您是否已运行数据库初始化 SQL (需包含 'chat_sessions' 表)。");
+          alert("❌ 同步失败。请确认数据库表是否已初始化。");
       }
   };
 
   const deleteSession = (id: string, e?: React.MouseEvent) => {
-    // Critical: Stop propagation to prevent selecting the session we are deleting
     if (e) {
         e.stopPropagation();
         e.nativeEvent.stopImmediatePropagation();
         e.preventDefault();
     }
-    
     if (!window.confirm("确认删除此会话记录吗？")) return;
     
-    // Cloud delete
     if (settings.supabaseKey) {
         deleteCloudChatSession(id, settings);
     }
@@ -587,14 +537,11 @@ export const AIChatbot: React.FC<Props> = ({
     setSessions(prev => {
       const next = { ...prev };
       delete next[id];
-      
-      // If we are deleting the currently active session
       if (activeSessionId === id) {
           const remainingIds = Object.keys(next).sort((a, b) => next[b].createdAt - next[a].createdAt);
           if (remainingIds.length > 0) {
-              setActiveSessionId(remainingIds[0]); // Switch to next available
+              setActiveSessionId(remainingIds[0]);
           } else {
-              // If no sessions left, create a fresh one immediately
               const newId = `session_${Date.now()}`;
               next[newId] = {
                   id: newId,
@@ -613,8 +560,6 @@ export const AIChatbot: React.FC<Props> = ({
     return activeSessionId ? sessions[activeSessionId]?.messages || [] : [];
   }, [sessions, activeSessionId]);
 
-  // --- Message Action Handlers ---
-
   const handleStop = () => {
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
@@ -624,35 +569,26 @@ export const AIChatbot: React.FC<Props> = ({
     }
   };
 
-  // Improved Delete Handler: Cascade Delete Hidden Tool Messages
   const handleDeleteMessage = (index: number) => {
     if (!activeSessionId) return;
     setSessions(prev => {
       const sess = { ...prev[activeSessionId] };
       const indicesToRemove = new Set<number>();
-      
-      // 1. Mark target message for removal
       indicesToRemove.add(index);
       
-      // 2. Cascade Backward: Remove hidden Tool messages leading up to this one
-      // (e.g., if we delete a Model Response, we should remove the hidden Tool Result and Tool Call preceding it)
       let curr = index - 1;
       while (curr >= 0) {
           const m = sess.messages[curr];
-          // Check if message is hidden (Tool Result OR Model Call with no text)
           const isHiddenToolRes = m.role === 'tool'; 
           const isHiddenToolCall = m.role === 'model' && !m.text && m.toolCalls && m.toolCalls.length > 0;
-          
           if (isHiddenToolRes || isHiddenToolCall) {
               indicesToRemove.add(curr);
               curr--;
           } else {
-              // Stop when we hit a visible message
               break;
           }
       }
       
-      // 3. Cascade Forward: (Optional) If we delete a Tool Call, delete the Tool Result?
       curr = index + 1;
       while (curr < sess.messages.length) {
           const m = sess.messages[curr];
@@ -743,13 +679,11 @@ export const AIChatbot: React.FC<Props> = ({
       setViewingReference({ type, content });
   };
 
-  // --- Core Generation Logic (Recursive for Tools) ---
   const runGeneration = async (sessionId: string, history: Message[]) => {
       setIsLoading(true);
       const controller = new AbortController();
       abortControllerRef.current = controller;
 
-      // Map local messages to OpenAI API format
       const apiHistory: OpenAIMessage[] = history.map(m => {
           if (m.role === 'model') {
               return {
@@ -771,7 +705,6 @@ export const AIChatbot: React.FC<Props> = ({
           }
       });
 
-      // Append placeholder
       setSessions(prev => {
           const sess = { ...prev[sessionId] };
           sess.messages = [...sess.messages, { role: 'model', text: '' }];
@@ -809,7 +742,6 @@ export const AIChatbot: React.FC<Props> = ({
               }
           }
 
-          // === Handle Tool Calls ===
           if (toolCallsResult.length > 0) {
               setIsToolExecuting(true);
               
@@ -849,11 +781,10 @@ export const AIChatbot: React.FC<Props> = ({
                       onRegenerateReport?.(tool.args.instructions);
                       result = "Report regeneration triggered.";
                   } else if (tool.name === 'update_meta_info') {
-                      // ** New Tool: Update Meta Info **
                       const newInfo = tool.args.new_info;
                       if (newInfo) {
                           onUpdateMetaInfo(newInfo);
-                          result = "Meta info (patient record) updated successfully. The new context is now available.";
+                          result = "Meta info updated successfully.";
                       } else {
                           result = "Failed to update meta info: content was empty.";
                       }
@@ -908,7 +839,6 @@ export const AIChatbot: React.FC<Props> = ({
       }
   };
 
-  // --- Render ---
   return (
     <div className="flex h-full bg-white rounded-2xl shadow-xl overflow-hidden border border-slate-200">
       
@@ -928,7 +858,6 @@ export const AIChatbot: React.FC<Props> = ({
         isCompressing={isCompressing}
       />
       
-      {/* Reference Modal (Report/Meta Viewer) */}
       {viewingReference && (
           <div className="fixed inset-0 z-[110] flex items-center justify-center p-4">
               <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm" onClick={() => setViewingReference(null)}></div>
@@ -950,7 +879,7 @@ export const AIChatbot: React.FC<Props> = ({
           </div>
       )}
 
-      {/* Sidebar (Session List) */}
+      {/* Sidebar */}
       <div className="w-64 bg-slate-50 border-r border-slate-200 hidden md:flex flex-col">
         <div className="p-4 border-b border-slate-200">
            <button 
@@ -1042,7 +971,11 @@ export const AIChatbot: React.FC<Props> = ({
         </div>
 
         {/* Messages List */}
-        <div className="flex-1 overflow-y-auto p-6 scroll-smooth custom-scrollbar">
+        <div 
+            className="flex-1 overflow-y-auto p-6 scroll-smooth custom-scrollbar relative" 
+            ref={messagesContainerRef}
+            onScroll={handleScroll}
+        >
            {activeMessages.length === 0 ? (
              <div className="h-full flex flex-col items-center justify-center text-slate-400 space-y-4">
                 <div className="w-20 h-20 bg-slate-100 rounded-full flex items-center justify-center text-4xl">🤖</div>
@@ -1066,11 +999,20 @@ export const AIChatbot: React.FC<Props> = ({
                />
              ))
            )}
-           {/* Only used for initial scroll position, not active following */}
            <div ref={messagesEndRef} className="h-4" />
+
+           {/* Jump to Bottom Button */}
+           {showScrollButton && (
+               <button 
+                   onClick={scrollToBottom}
+                   className="fixed bottom-32 right-8 z-30 w-10 h-10 bg-white/80 backdrop-blur rounded-full shadow-lg border border-slate-200 text-slate-500 hover:text-indigo-600 hover:bg-white flex items-center justify-center transition-all animate-in fade-in slide-in-from-bottom-4"
+                   title="跳转至最新消息"
+               >
+                   <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" /></svg>
+               </button>
+           )}
         </div>
         
-        {/* Tool Execution Indicator (Floating) */}
         {isToolExecuting && (
              <div className="absolute bottom-24 left-1/2 -translate-x-1/2 bg-white/90 backdrop-blur border border-indigo-100 shadow-lg px-4 py-2 rounded-full flex items-center gap-3 animate-in fade-in slide-in-from-bottom-2 z-30">
                  <div className="w-4 h-4 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin"></div>
@@ -1078,7 +1020,6 @@ export const AIChatbot: React.FC<Props> = ({
              </div>
         )}
 
-        {/* Input Area */}
         <div className="p-6 bg-white border-t border-slate-100 relative z-20">
            <div className="flex gap-4 items-end max-w-5xl mx-auto">
               <div className="flex-1 relative">
