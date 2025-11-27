@@ -1,4 +1,6 @@
 
+
+
 import React, { useState } from 'react';
 import { AISettings } from '../types';
 import { fetchAvailableModels, testModelConnection, DEFAULT_ANALYZE_SYSTEM_INSTRUCTION } from '../services/openaiService';
@@ -137,6 +139,7 @@ create table if not exists chat_sessions (
   id text primary key,
   title text,
   messages jsonb,
+  meta_info text,  -- 新增元信息列
   created_at bigint
 );
 
@@ -472,6 +475,7 @@ create table if not exists chat_sessions (
   id text primary key,
   title text,
   messages jsonb,
+  meta_info text,
   created_at bigint
 );
 

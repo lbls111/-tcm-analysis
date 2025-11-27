@@ -1,4 +1,6 @@
 
+
+
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { generateChatStream, OpenAIMessage, OpenAIToolCall } from '../services/openaiService';
 import { AnalysisResult, AISettings } from '../types';
@@ -27,6 +29,7 @@ interface Session {
   title: string;
   messages: Message[];
   createdAt: number;
+  metaInfo?: string; // Session-specific context
 }
 
 interface Props {
@@ -37,8 +40,6 @@ interface Props {
   onRegenerateReport?: (instructions: string) => void;
   onHerbClick?: (herbName: string) => void;
   settings: AISettings;
-  metaInfo: string;
-  onUpdateMetaInfo: (info: string) => void;
 }
 
 const LS_CHAT_SESSIONS_KEY = "logicmaster_chat_sessions";
@@ -73,6 +74,7 @@ const HerbPill: React.FC<{name: string, onClick: (name: string) => void}> = ({ n
     <span 
       onClick={(e) => {
           e.preventDefault();
+          e.stopPropagation(); // Stop propagation to prevent link navigation
           onClick(name);
       }}
       className="inline-flex items-center gap-1 mx-1 px-1.5 py-0.5 rounded text-xs font-bold bg-indigo-50 text-indigo-700 border border-indigo-200 cursor-pointer hover:bg-indigo-100 hover:border-indigo-300 hover:text-indigo-900 transition-all transform hover:-translate-y-0.5 align-middle shadow-sm select-none"
@@ -140,25 +142,23 @@ const ChatMessageItem: React.FC<MessageItemProps> = ({
       // This regex matches <...> OR [ ... ](...) OR ![ ... ](...)
       const protectedRegex = /(<[^>]+>|\[.*?\]\(.*?\)|!\[.*?\]\(.*?\))/g;
       
-      // Also protect custom Citation tags [[AI报告]] and [[元信息]] initially to avoid partial matches
-      // Actually, we want to match specific Citation tags first, then Herbs.
-      
       let processingText = text;
 
       // 2. Identify Herbs and Citations
-      // Replace Citation Tags with HTML markers we can intercept
+      // Replace Citation Tags with HTML markers we can intercept (Citations use custom span logic because they are simple)
+      // NOTE: Herb links now use Markdown syntax [Herb](herb://Herb) to be robust against HTML escaping
       processingText = processingText.replace(/\[\[AI报告\]\]/g, '<span data-citation="report">[[AI报告]]</span>');
       processingText = processingText.replace(/\[\[元信息\]\]/g, '<span data-citation="meta">[[元信息]]</span>');
 
       const parts = processingText.split(protectedRegex);
 
       // 3. Process plain text segments with herbRegex
-      const finalHtmlString = parts.map(part => {
+      const finalString = parts.map(part => {
           if (part.match(protectedRegex)) return part;
-          if (part.includes('data-citation')) return part; // Skip citation tags we just added
+          if (part.includes('data-citation')) return part; 
           
-          // Replace herbs with a specific span marker
-          return part.replace(herbRegex, (match) => `<span data-herb="${match}">${match}</span>`);
+          // Replace herbs with Markdown Link syntax: [黄芪](herb://黄芪)
+          return part.replace(herbRegex, (match) => `[${match}](herb://${match})`);
       }).join('');
       
       return (
@@ -166,27 +166,21 @@ const ChatMessageItem: React.FC<MessageItemProps> = ({
             remarkPlugins={[remarkGfm]}
             rehypePlugins={[rehypeRaw]}
             components={{
-                span: ({node, className, children, ...props}) => {
-                    // Check if this span was injected by us
-                    const herbName = props['data-herb'] as string;
-                    if (herbName) {
-                        return <HerbPill name={herbName} onClick={onHerbClick || (() => {})} />;
-                    }
-                    
-                    const citationType = props['data-citation'] as 'report' | 'meta';
-                    if (citationType) {
-                        return <CitationLink type={citationType} onClick={() => onCitationClick(citationType)} />;
-                    }
-
-                    return <span className={className} {...props}>{children}</span>;
-                },
+                // Intercept Links to render Herbs
                 a: ({node, href, children, ...props}) => {
-                    // Backup for any legacy herb:// links
                     if (href && href.startsWith('herb://')) {
                         const name = decodeURIComponent(href.replace('herb://', ''));
                         return <HerbPill name={name} onClick={onHerbClick || (() => {})} />;
                     }
                     return <a href={href} target="_blank" rel="noopener noreferrer" className="text-blue-600 underline decoration-blue-300 hover:text-blue-800" {...props}>{children}</a>;
+                },
+                // Intercept Spans for Citations
+                span: ({node, className, children, ...props}) => {
+                    const citationType = props['data-citation'] as 'report' | 'meta';
+                    if (citationType) {
+                        return <CitationLink type={citationType} onClick={() => onCitationClick(citationType)} />;
+                    }
+                    return <span className={className} {...props}>{children}</span>;
                 },
                 table: ({node, ...props}) => <div className="overflow-x-auto my-4 rounded-lg border border-slate-200 shadow-sm"><table className="border-collapse table-auto w-full text-sm" {...props} /></div>,
                 thead: ({node, ...props}) => <thead className="bg-slate-50 border-b border-slate-200 text-slate-600" {...props} />,
@@ -198,7 +192,7 @@ const ChatMessageItem: React.FC<MessageItemProps> = ({
                 ol: ({node, ...props}) => <ol className="list-decimal pl-5 mb-4 space-y-1" {...props} />,
             }}
         >
-            {finalHtmlString}
+            {finalString}
         </ReactMarkdown>
       );
   };
@@ -314,9 +308,7 @@ export const AIChatbot: React.FC<Props> = ({
   onUpdatePrescription,
   onRegenerateReport,
   onHerbClick,
-  settings,
-  metaInfo,
-  onUpdateMetaInfo
+  settings
 }) => {
   const [sessions, setSessions] = useState<Record<string, Session>>({});
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -343,8 +335,6 @@ export const AIChatbot: React.FC<Props> = ({
       if (sortedHerbNames.length === 0) return /(?!)/; // Match nothing
       // Escape all names
       const escaped = sortedHerbNames.map(escapeRegExp);
-      // Use boundary checks or just simple inclusion? Simple inclusion is safer for Chinese.
-      // Use standard OR grouping.
       return new RegExp(`(${escaped.join('|')})`, 'g');
   }, [sortedHerbNames]);
 
@@ -362,7 +352,8 @@ export const AIChatbot: React.FC<Props> = ({
                         id: cs.id,
                         title: cs.title,
                         messages: cs.messages,
-                        createdAt: cs.created_at
+                        createdAt: cs.created_at,
+                        metaInfo: cs.meta_info
                     };
                 });
                 setSessions(sessionMap);
@@ -402,6 +393,7 @@ export const AIChatbot: React.FC<Props> = ({
                     title: "新的研讨",
                     createdAt: Date.now(),
                     messages: [{ role: 'model', text: '我是您的 AI 中医助手。我可以帮您分析处方，或查阅药典数据。请问您想了解什么？' }],
+                    metaInfo: ""
                  };
                  setActiveSessionId(newId);
                  // Sync new session to cloud immediately if connected
@@ -410,7 +402,8 @@ export const AIChatbot: React.FC<Props> = ({
                          id: newSession.id,
                          title: newSession.title,
                          messages: newSession.messages,
-                         created_at: newSession.createdAt
+                         created_at: newSession.createdAt,
+                         meta_info: newSession.metaInfo
                      }, settings);
                  }
                  return { [newId]: newSession };
@@ -433,13 +426,14 @@ export const AIChatbot: React.FC<Props> = ({
     // Cloud Sync Logic (Debounce needed in real world, but for now we sync active session)
     if (activeSessionId && sessions[activeSessionId] && settings.supabaseKey) {
         const sess = sessions[activeSessionId];
-        // Only sync if messages > 1 (not just welcome msg)
-        if (sess.messages.length > 1) {
+        // Only sync if messages > 1 (not just welcome msg) or metaInfo changed
+        if (sess.messages.length > 1 || sess.metaInfo) {
              saveCloudChatSession({
                  id: sess.id,
                  title: sess.title,
                  messages: sess.messages,
-                 created_at: sess.createdAt
+                 created_at: sess.createdAt,
+                 meta_info: sess.metaInfo
              }, settings).catch(e => console.error("Cloud sync failed", e));
         }
     }
@@ -476,6 +470,7 @@ export const AIChatbot: React.FC<Props> = ({
       title: "新的研讨",
       createdAt: Date.now(),
       messages: [{ role: 'model', text: '我是您的 AI 中医助手。我可以帮您分析处方，或查阅药典数据。请问您想了解什么？' }],
+      metaInfo: ""
     };
     setSessions(prev => ({ ...prev, [newId]: newSession }));
     setActiveSessionId(newId);
@@ -485,7 +480,8 @@ export const AIChatbot: React.FC<Props> = ({
              id: newSession.id,
              title: newSession.title,
              messages: newSession.messages,
-             created_at: newSession.createdAt
+             created_at: newSession.createdAt,
+             meta_info: newSession.metaInfo
          }, settings);
     }
     return newId;
@@ -504,7 +500,8 @@ export const AIChatbot: React.FC<Props> = ({
           id: sess.id,
           title: sess.title,
           messages: sess.messages,
-          created_at: sess.createdAt
+          created_at: sess.createdAt,
+          meta_info: sess.metaInfo
       }, settings);
       
       setIsSavingCloud(false);
@@ -512,12 +509,11 @@ export const AIChatbot: React.FC<Props> = ({
       if (success) {
           alert("☁️ 会话已同步到云端数据库。");
       } else {
-          alert("❌ 同步失败。\n请确认您是否已运行数据库初始化 SQL (需包含 'chat_sessions' 表)。");
+          alert("❌ 同步失败。\n请确认您是否已运行数据库初始化 SQL (需包含 'meta_info' 列)。");
       }
   };
 
   const deleteSession = (id: string, e?: React.MouseEvent) => {
-    // Critical: Stop propagation to prevent selecting the session we are deleting
     if (e) {
         e.stopPropagation();
         e.nativeEvent.stopImmediatePropagation();
@@ -526,7 +522,6 @@ export const AIChatbot: React.FC<Props> = ({
     
     if (!window.confirm("确认删除此会话记录吗？")) return;
     
-    // Cloud delete
     if (settings.supabaseKey) {
         deleteCloudChatSession(id, settings);
     }
@@ -535,19 +530,18 @@ export const AIChatbot: React.FC<Props> = ({
       const next = { ...prev };
       delete next[id];
       
-      // If we are deleting the currently active session
       if (activeSessionId === id) {
           const remainingIds = Object.keys(next).sort((a, b) => next[b].createdAt - next[a].createdAt);
           if (remainingIds.length > 0) {
-              setActiveSessionId(remainingIds[0]); // Switch to next available
+              setActiveSessionId(remainingIds[0]);
           } else {
-              // If no sessions left, create a fresh one immediately
               const newId = `session_${Date.now()}`;
               next[newId] = {
                   id: newId,
                   title: "新的研讨",
                   createdAt: Date.now(),
                   messages: [{ role: 'model', text: '我是您的 AI 中医助手。我可以帮您分析处方，或查阅药典数据。请问您想了解什么？' }],
+                  metaInfo: ""
               };
               setActiveSessionId(newId);
           }
@@ -559,6 +553,18 @@ export const AIChatbot: React.FC<Props> = ({
   const activeMessages = useMemo(() => {
     return activeSessionId ? sessions[activeSessionId]?.messages || [] : [];
   }, [sessions, activeSessionId]);
+  
+  const activeMetaInfo = useMemo(() => {
+    return activeSessionId ? sessions[activeSessionId]?.metaInfo || "" : "";
+  }, [sessions, activeSessionId]);
+
+  const handleUpdateMetaInfo = (newInfo: string) => {
+      if (!activeSessionId) return;
+      setSessions(prev => ({
+          ...prev,
+          [activeSessionId]: { ...prev[activeSessionId], metaInfo: newInfo }
+      }));
+  };
 
   // --- Message Action Handlers ---
 
@@ -650,7 +656,7 @@ export const AIChatbot: React.FC<Props> = ({
   };
   
   const handleCitationClick = (type: 'report' | 'meta') => {
-      const content = type === 'report' ? (reportContent || '暂无报告') : (metaInfo || '暂无元信息');
+      const content = type === 'report' ? (reportContent || '暂无报告') : (activeMetaInfo || '暂无元信息');
       setViewingReference({ type, content });
   };
 
@@ -659,6 +665,9 @@ export const AIChatbot: React.FC<Props> = ({
       setIsLoading(true);
       const controller = new AbortController();
       abortControllerRef.current = controller;
+
+      // Get current meta info from state
+      const currentMetaInfo = sessions[sessionId]?.metaInfo || "";
 
       // Map local messages to OpenAI API format
       const apiHistory: OpenAIMessage[] = history.map(m => {
@@ -697,7 +706,7 @@ export const AIChatbot: React.FC<Props> = ({
               reportContent, 
               settings, 
               controller.signal,
-              metaInfo
+              currentMetaInfo // Pass session-specific meta info
           );
 
           let fullText = '';
@@ -816,8 +825,8 @@ export const AIChatbot: React.FC<Props> = ({
       <MetaInfoModal 
          isOpen={showMetaModal}
          onClose={() => setShowMetaModal(false)}
-         metaInfo={metaInfo}
-         onSave={onUpdateMetaInfo}
+         metaInfo={activeMetaInfo}
+         onSave={handleUpdateMetaInfo}
       />
       
       {/* Reference Modal (Report/Meta Viewer) */}
@@ -865,13 +874,22 @@ export const AIChatbot: React.FC<Props> = ({
                      : 'hover:bg-slate-200/50 border-transparent'
                  }`}
                >
-                 <div className="flex items-center gap-3 overflow-hidden">
-                    <span className={`text-lg ${activeSessionId === session.id ? 'text-indigo-600' : 'text-slate-400'}`}>
-                      {activeSessionId === session.id ? '💬' : '🗨️'}
-                    </span>
-                    <span className={`text-sm font-medium truncate ${activeSessionId === session.id ? 'text-slate-800' : 'text-slate-600'}`}>
-                      {session.title}
-                    </span>
+                 <div className="flex flex-col gap-1 overflow-hidden flex-1 min-w-0">
+                     <div className="flex items-center gap-3">
+                        <span className={`text-lg ${activeSessionId === session.id ? 'text-indigo-600' : 'text-slate-400'}`}>
+                        {activeSessionId === session.id ? '💬' : '🗨️'}
+                        </span>
+                        <span className={`text-sm font-medium truncate flex-1 ${activeSessionId === session.id ? 'text-slate-800' : 'text-slate-600'}`}>
+                        {session.title}
+                        </span>
+                     </div>
+                     {session.metaInfo && (
+                        <div className="flex items-center gap-1 pl-8">
+                             <span className="text-[10px] bg-amber-50 text-amber-600 px-1 rounded border border-amber-100 truncate">
+                                🧠 有元信息
+                             </span>
+                        </div>
+                     )}
                  </div>
                  <button 
                    onClick={(e) => deleteSession(session.id, e)}
@@ -904,10 +922,10 @@ export const AIChatbot: React.FC<Props> = ({
            <div className="flex items-center gap-3">
                <button 
                  onClick={() => setShowMetaModal(true)}
-                 className={`hidden md:flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-bold transition-colors ${metaInfo ? 'bg-amber-100 text-amber-800 border-amber-200 shadow-sm' : 'bg-white text-slate-500 border-slate-200 hover:bg-amber-50 hover:text-amber-600'}`}
-                 title="设置研讨上下文"
+                 className={`hidden md:flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-bold transition-colors ${activeMetaInfo ? 'bg-amber-100 text-amber-800 border-amber-200 shadow-sm' : 'bg-white text-slate-500 border-slate-200 hover:bg-amber-50 hover:text-amber-600'}`}
+                 title="设置本场研讨的患者背景或上下文"
                >
-                   <span>🧠</span> {metaInfo ? '元信息已设定' : '设置元信息'}
+                   <span>🧠</span> {activeMetaInfo ? '元信息已设定' : '设置元信息'}
                </button>
 
                <button 

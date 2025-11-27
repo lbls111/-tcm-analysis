@@ -1,4 +1,6 @@
 
+
+
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { AISettings, BenCaoHerb, CloudReport, CloudChatSession } from '../types';
 
@@ -287,7 +289,8 @@ export const saveCloudChatSession = async (session: CloudChatSession, settings: 
             id: session.id,
             title: session.title,
             messages: session.messages,
-            created_at: session.created_at
+            created_at: session.created_at,
+            meta_info: session.meta_info
         };
 
         const { error } = await client
