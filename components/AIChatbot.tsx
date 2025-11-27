@@ -3,9 +3,6 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { generateChatStream, OpenAIMessage, OpenAIToolCall } from '../services/openaiService';
 import { AnalysisResult, AISettings } from '../types';
 import { searchHerbsForAI, FULL_HERB_LIST } from '../data/herbDatabase';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import rehypeRaw from 'rehype-raw';
 import { fetchCloudChatSessions, saveCloudChatSession, deleteCloudChatSession } from '../services/supabaseService';
 import { MetaInfoModal } from './MetaInfoModal';
 
@@ -44,15 +41,7 @@ interface Props {
 const LS_CHAT_SESSIONS_KEY = "logicmaster_chat_sessions";
 
 // ==========================================
-// 2. Helpers (Auto Linking)
-// ==========================================
-
-function escapeRegExp(string: string) {
-  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-// ==========================================
-// 3. Sub-Components (Message Item)
+// 2. Sub-Components (Message Item)
 // ==========================================
 
 interface MessageItemProps {
@@ -66,35 +55,8 @@ interface MessageItemProps {
   onContinue: () => void;
   onHerbClick?: (herbName: string) => void;
   onCitationClick: (type: 'report' | 'meta') => void;
-  herbRegex: RegExp;
+  herbRegex: RegExp | null;
 }
-
-const HerbPill: React.FC<{name: string, onClick: (name: string) => void}> = ({ name, onClick }) => (
-    <span 
-      onClick={(e) => {
-          e.preventDefault();
-          onClick(name);
-      }}
-      className="inline-flex items-center gap-1 mx-1 px-1.5 py-0.5 rounded text-xs font-bold bg-indigo-50 text-indigo-700 border border-indigo-200 cursor-pointer hover:bg-indigo-100 hover:border-indigo-300 hover:text-indigo-900 transition-all transform hover:-translate-y-0.5 align-middle shadow-sm select-none"
-      title={`点击查看【${name}】详情`}
-    >
-        <span className="text-[10px] opacity-60">💊</span>
-        {name}
-    </span>
-);
-
-const CitationLink: React.FC<{type: 'report' | 'meta', onClick: () => void}> = ({ type, onClick }) => (
-    <span 
-      onClick={(e) => {
-          e.preventDefault();
-          onClick();
-      }}
-      className={`inline-flex items-center gap-1 mx-1 px-1.5 py-0.5 rounded text-xs font-bold cursor-pointer transition-all transform hover:-translate-y-0.5 align-middle shadow-sm select-none border ${type === 'report' ? 'bg-fuchsia-50 text-fuchsia-700 border-fuchsia-200 hover:bg-fuchsia-100' : 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100'}`}
-    >
-        <span>{type === 'report' ? '📑' : '🧠'}</span>
-        {type === 'report' ? 'AI报告' : '元信息'}
-    </span>
-);
 
 const ChatMessageItem: React.FC<MessageItemProps> = ({ 
   message, 
@@ -119,7 +81,12 @@ const ChatMessageItem: React.FC<MessageItemProps> = ({
   }, [message.text]);
 
   const handleCopy = () => {
-    navigator.clipboard.writeText(message.text).then(() => {
+    // Strip HTML tags for copying text
+    const tempDiv = document.createElement('div');
+    tempDiv.innerHTML = message.text;
+    const plainText = tempDiv.textContent || tempDiv.innerText || message.text;
+    
+    navigator.clipboard.writeText(plainText).then(() => {
       setCopyStatus('copied');
       setTimeout(() => setCopyStatus('idle'), 2000);
     });
@@ -132,75 +99,72 @@ const ChatMessageItem: React.FC<MessageItemProps> = ({
     }
     setIsEditing(false);
   };
-
-  const renderTextWithAutoLinks = (text: string) => {
-      if (!text) return null;
-
-      // 1. Split text by protected segments (HTML tags or Markdown links)
-      // This regex matches <...> OR [ ... ](...) OR ![ ... ](...)
-      const protectedRegex = /(<[^>]+>|\[.*?\]\(.*?\)|!\[.*?\]\(.*?\))/g;
+  
+  // Event Delegation for clicking Herbs/Citations inside Dangerous HTML
+  const handleContentClick = (e: React.MouseEvent<HTMLDivElement>) => {
+      const target = e.target as HTMLElement;
       
-      // Also protect custom Citation tags [[AI报告]] and [[元信息]] initially to avoid partial matches
-      // Actually, we want to match specific Citation tags first, then Herbs.
+      // 1. Check for Herb Link
+      const herbSpan = target.closest('[data-herb]');
+      if (herbSpan) {
+          const herbName = herbSpan.getAttribute('data-herb');
+          if (herbName && onHerbClick) {
+              onHerbClick(herbName);
+              return;
+          }
+      }
       
-      let processingText = text;
+      // 2. Check for Citation Link
+      const citationSpan = target.closest('[data-citation]');
+      if (citationSpan) {
+          const type = citationSpan.getAttribute('data-citation') as 'report' | 'meta';
+          if (type) {
+              onCitationClick(type);
+              return;
+          }
+      }
+  };
 
-      // 2. Identify Herbs and Citations
-      // Replace Citation Tags with HTML markers we can intercept
-      processingText = processingText.replace(/\[\[AI报告\]\]/g, '<span data-citation="report">[[AI报告]]</span>');
-      processingText = processingText.replace(/\[\[元信息\]\]/g, '<span data-citation="meta">[[元信息]]</span>');
-
-      const parts = processingText.split(protectedRegex);
-
-      // 3. Process plain text segments with herbRegex
-      const finalHtmlString = parts.map(part => {
-          if (part.match(protectedRegex)) return part;
-          if (part.includes('data-citation')) return part; // Skip citation tags we just added
-          
-          // Replace herbs with a specific span marker
-          return part.replace(herbRegex, (match) => `<span data-herb="${match}">${match}</span>`);
-      }).join('');
+  // Advanced HTML Processing:
+  // 1. Replace [[Citation]] markers
+  // 2. Auto-highlight herbs using regex (outside of existing tags)
+  // 3. Add styling classes to basic HTML tags
+  const processHtml = (html: string) => {
+      if (!html) return '';
       
-      return (
-        <ReactMarkdown 
-            remarkPlugins={[remarkGfm]}
-            rehypePlugins={[rehypeRaw]}
-            components={{
-                span: ({node, className, children, ...props}) => {
-                    // Check if this span was injected by us
-                    const herbName = props['data-herb'] as string;
-                    if (herbName) {
-                        return <HerbPill name={herbName} onClick={onHerbClick || (() => {})} />;
-                    }
-                    
-                    const citationType = props['data-citation'] as 'report' | 'meta';
-                    if (citationType) {
-                        return <CitationLink type={citationType} onClick={() => onCitationClick(citationType)} />;
-                    }
+      let processed = html;
 
-                    return <span className={className} {...props}>{children}</span>;
-                },
-                a: ({node, href, children, ...props}) => {
-                    // Backup for any legacy herb:// links
-                    if (href && href.startsWith('herb://')) {
-                        const name = decodeURIComponent(href.replace('herb://', ''));
-                        return <HerbPill name={name} onClick={onHerbClick || (() => {})} />;
-                    }
-                    return <a href={href} target="_blank" rel="noopener noreferrer" className="text-blue-600 underline decoration-blue-300 hover:text-blue-800" {...props}>{children}</a>;
-                },
-                table: ({node, ...props}) => <div className="overflow-x-auto my-4 rounded-lg border border-slate-200 shadow-sm"><table className="border-collapse table-auto w-full text-sm" {...props} /></div>,
-                thead: ({node, ...props}) => <thead className="bg-slate-50 border-b border-slate-200 text-slate-600" {...props} />,
-                th: ({node, ...props}) => <th className="px-4 py-3 text-left font-bold whitespace-nowrap" {...props} />,
-                td: ({node, ...props}) => <td className="border-t border-slate-100 px-4 py-2" {...props} />,
-                img: ({node, ...props}) => <img className="max-w-full rounded-lg shadow-sm" {...props} alt="" />,
-                p: ({node, ...props}) => <p className="mb-2 last:mb-0 leading-relaxed" {...props} />,
-                ul: ({node, ...props}) => <ul className="list-disc pl-5 mb-4 space-y-1" {...props} />,
-                ol: ({node, ...props}) => <ol className="list-decimal pl-5 mb-4 space-y-1" {...props} />,
-            }}
-        >
-            {finalHtmlString}
-        </ReactMarkdown>
-      );
+      // --- Step 0: Remove potential Markdown Code Blocks ---
+      processed = processed.replace(/```html/g, '').replace(/```/g, '');
+
+      // --- Step 1: Citations ---
+      processed = processed
+          .replace(/\[\[AI报告\]\]/g, '<span class="citation-link cursor-pointer inline-flex items-center gap-1 mx-1 px-1.5 py-0.5 rounded text-xs font-bold bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100 transition-all select-none" data-citation="report">📑 AI报告</span>')
+          .replace(/\[\[元信息\]\]/g, '<span class="citation-link cursor-pointer inline-flex items-center gap-1 mx-1 px-1.5 py-0.5 rounded text-xs font-bold bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 transition-all select-none" data-citation="meta">🧠 元信息</span>');
+
+      // --- Step 2: Herb Highlighting (Robust Regex) ---
+      // Only highlight if regex exists and we have plain text herbs
+      if (herbRegex) {
+          const parts = processed.split(/(<[^>]+>)/g);
+          processed = parts.map(part => {
+              // If it's an HTML tag, leave it alone
+              if (part.startsWith('<')) return part;
+              // Otherwise, replace herb names
+              return part.replace(herbRegex, (match) => 
+                  `<span class="herb-link cursor-pointer inline-flex items-center gap-0.5 mx-0.5 px-1 py-0 rounded-sm text-indigo-700 font-bold border-b border-indigo-200 hover:bg-indigo-50 hover:border-indigo-500 transition-colors" data-herb="${match}">${match}</span>`
+              );
+          }).join('');
+      }
+      
+      // --- Step 3: Inject Styles for Standard Tags ---
+      processed = processed.replace(/<table>/g, '<div class="overflow-x-auto my-3 border border-slate-200 rounded-lg"><table class="w-full text-sm border-collapse">');
+      processed = processed.replace(/<\/table>/g, '</table></div>');
+      processed = processed.replace(/<th>/g, '<th class="bg-slate-50 text-slate-600 font-bold px-4 py-2 text-left border-b border-slate-200 whitespace-nowrap">');
+      processed = processed.replace(/<td>/g, '<td class="px-4 py-2 border-b border-slate-50 text-slate-700 align-top">');
+      processed = processed.replace(/<ul>/g, '<ul class="list-disc pl-5 space-y-1 my-2">');
+      processed = processed.replace(/<ol>/g, '<ol class="list-decimal pl-5 space-y-1 my-2">');
+      
+      return processed;
   };
 
   // Hide Tool Messages entirely from the main flow
@@ -257,7 +221,11 @@ const ChatMessageItem: React.FC<MessageItemProps> = ({
                  <span>{message.text}</span>
                </div>
              ) : (
-                renderTextWithAutoLinks(message.text || '')
+                <div 
+                    className="prose prose-sm max-w-none prose-slate"
+                    onClick={handleContentClick}
+                    dangerouslySetInnerHTML={{ __html: processHtml(message.text) }}
+                />
              )}
              
              {/* Continue Button for truncated AI responses */}
@@ -277,7 +245,7 @@ const ChatMessageItem: React.FC<MessageItemProps> = ({
         {/* Action Toolbar */}
         {!isEditing && !isLoading && (
           <div className={`flex items-center gap-1 mt-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200 ${message.role === 'user' ? 'justify-end pr-1' : 'justify-start pl-1'}`}>
-             <ActionButton icon="📋" label={copyStatus === 'copied' ? '已复制' : '复制'} onClick={handleCopy} />
+             <ActionButton icon="📋" label={copyStatus === 'copied' ? '已复制' : '复制文本'} onClick={handleCopy} />
              <ActionButton icon="✎" label="编辑" onClick={() => setIsEditing(true)} />
              <ActionButton icon="↻" label={message.role === 'user' ? '重新发送' : '删除并重新生成'} onClick={() => onRegenerate(index)} />
              <ActionButton icon="🗑️" label="删除" onClick={() => onDelete(index)} isDestructive />
@@ -332,21 +300,15 @@ export const AIChatbot: React.FC<Props> = ({
   const abortControllerRef = useRef<AbortController | null>(null);
   const messageCountRef = useRef(0);
 
-  // === Performance Optimization ===
-  // 1. Sort herb names by length desc (to match longest first)
-  const sortedHerbNames = useMemo(() => {
-     return FULL_HERB_LIST.map(h => h.name).sort((a, b) => b.length - a.length);
-  }, [FULL_HERB_LIST.length]); 
-
-  // 2. Create a single RegEx for all herbs (O(1) compilation, O(N) scan)
+  // Memoized Herb Regex (Same as App.tsx)
   const herbRegex = useMemo(() => {
-      if (sortedHerbNames.length === 0) return /(?!)/; // Match nothing
-      // Escape all names
-      const escaped = sortedHerbNames.map(escapeRegExp);
-      // Use boundary checks or just simple inclusion? Simple inclusion is safer for Chinese.
-      // Use standard OR grouping.
+      const names = FULL_HERB_LIST.map(h => h.name).sort((a, b) => b.length - a.length);
+      if (names.length === 0) return null;
+      // Filter short common words that might cause false positives if not careful, though sorting by length helps
+      const validNames = names.filter(n => n.length >= 1); 
+      const escaped = validNames.map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
       return new RegExp(`(${escaped.join('|')})`, 'g');
-  }, [sortedHerbNames]);
+  }, [FULL_HERB_LIST.length]);
 
   // --- Data Loading & Persistence ---
   useEffect(() => {
@@ -982,7 +944,7 @@ export const AIChatbot: React.FC<Props> = ({
                   rows={1}
                 />
                 <div className="absolute right-3 bottom-3 text-[10px] text-slate-400 font-medium bg-white/50 px-2 rounded pointer-events-none">
-                   支持 Markdown & HTML
+                   支持 HTML
                 </div>
               </div>
               

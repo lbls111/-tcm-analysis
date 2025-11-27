@@ -369,7 +369,8 @@ function App() {
         regenerateInstructions,
         undefined,
         controller.signal,
-        sysPrompt // Pass specific prompt
+        sysPrompt, // Pass specific prompt
+        metaInfo // Pass meta info to AI
       );
 
       let htmlContent = '';
@@ -421,7 +422,8 @@ function App() {
         undefined,
         partialReport,
         controller.signal,
-        sysPrompt // IMPORTANT: Pass the correct prompt for continuity
+        sysPrompt, // IMPORTANT: Pass the correct prompt for continuity
+        metaInfo // Pass meta info to AI for context continuity
       );
 
       let finalContent = partialReport;
