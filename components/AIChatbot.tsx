@@ -52,7 +52,6 @@ interface MessageItemProps {
   onDelete: (index: number) => void;
   onRegenerate: (index: number) => void;
   onEdit: (index: number, newText: string, resend: boolean) => void;
-  onContinue: () => void;
   onHerbClick?: (herbName: string) => void;
   onCitationClick: (type: 'report' | 'meta') => void;
   herbRegex: RegExp | null;
@@ -66,7 +65,6 @@ const ChatMessageItem: React.FC<MessageItemProps> = ({
   onDelete, 
   onRegenerate, 
   onEdit,
-  onContinue,
   onHerbClick,
   onCitationClick,
   herbRegex
@@ -168,15 +166,23 @@ const ChatMessageItem: React.FC<MessageItemProps> = ({
       return null;
   }
 
-  // System Summary Message (Hidden style)
+  // System Summary Message (Divider Style with Delete Option)
   if (message.role === 'system') {
       return (
-          <div className="flex items-center justify-center gap-4 my-8 opacity-60 hover:opacity-100 transition-opacity select-none group">
+          <div className="flex items-center justify-center gap-4 my-8 opacity-60 hover:opacity-100 transition-opacity select-none group relative">
                <div className="h-px bg-slate-200 flex-1 group-hover:bg-indigo-200 transition-colors"></div>
-               <span className="text-[10px] text-slate-400 font-medium uppercase tracking-wider bg-white px-2 group-hover:text-indigo-400 transition-colors flex items-center gap-2">
-                  <span>🗜️</span> 
-                  {message.text.includes('摘要') ? '历史对话已压缩 (Summary)' : 'System Notice'}
-               </span>
+               <div className="flex items-center gap-2">
+                   <span className="text-[10px] text-slate-400 font-medium uppercase tracking-wider bg-white px-2 group-hover:text-indigo-400 transition-colors flex items-center gap-1">
+                      <span>🗜️</span> 
+                      {message.text.includes('摘要') ? '历史对话已压缩 (Summary)' : 'System Notice'}
+                   </span>
+                   {/* Hidden delete button appearing on hover */}
+                   <button 
+                     onClick={() => onDelete(index)}
+                     className="hidden group-hover:block text-slate-300 hover:text-red-500 px-1 py-0.5 rounded hover:bg-red-50 transition-all"
+                     title="删除此摘要"
+                   >✕</button>
+               </div>
                <div className="h-px bg-slate-200 flex-1 group-hover:bg-indigo-200 transition-colors"></div>
           </div>
       );
@@ -219,16 +225,6 @@ const ChatMessageItem: React.FC<MessageItemProps> = ({
                     onClick={handleContentClick}
                     dangerouslySetInnerHTML={{ __html: processHtml(message.text) }}
                 />
-             )}
-             
-             {message.role === 'model' && isLast && !isLoading && (
-                 <button 
-                    onClick={onContinue}
-                    className="mt-4 text-xs bg-indigo-50 text-indigo-700 px-4 py-2 rounded-full border border-indigo-200 hover:bg-indigo-100 font-bold flex items-center gap-2 transition-all"
-                 >
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-3 h-3"><path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" /></svg>
-                    继续生成
-                 </button>
              )}
           </div>
         )}
@@ -449,7 +445,6 @@ export const AIChatbot: React.FC<Props> = ({
 
   useEffect(() => {
     const currentMsgs = activeSessionId ? sessions[activeSessionId]?.messages || [] : [];
-    // Only auto-scroll on new messages if we are close to bottom or it's a new message event
     if (messageCountRef.current !== currentMsgs.length) {
         scrollToBottom();
         messageCountRef.current = currentMsgs.length;
@@ -462,7 +457,6 @@ export const AIChatbot: React.FC<Props> = ({
       }
   };
 
-  // Handle scroll event for "Jump to Bottom" button
   const handleScroll = () => {
       if (!messagesContainerRef.current) return;
       const { scrollTop, scrollHeight, clientHeight } = messagesContainerRef.current;
@@ -570,15 +564,19 @@ export const AIChatbot: React.FC<Props> = ({
   };
 
   const handleDeleteMessage = (index: number) => {
-    if (!activeSessionId) return;
+    if (!activeSessionId || !sessions[activeSessionId]) return;
     setSessions(prev => {
       const sess = { ...prev[activeSessionId] };
+      // Safety check
+      if(!sess || !sess.messages) return prev;
+
       const indicesToRemove = new Set<number>();
       indicesToRemove.add(index);
       
       let curr = index - 1;
       while (curr >= 0) {
           const m = sess.messages[curr];
+          if (!m) break;
           const isHiddenToolRes = m.role === 'tool'; 
           const isHiddenToolCall = m.role === 'model' && !m.text && m.toolCalls && m.toolCalls.length > 0;
           if (isHiddenToolRes || isHiddenToolCall) {
@@ -592,6 +590,7 @@ export const AIChatbot: React.FC<Props> = ({
       curr = index + 1;
       while (curr < sess.messages.length) {
           const m = sess.messages[curr];
+          if (!m) break;
           if (m.role === 'tool') {
               indicesToRemove.add(curr);
               curr++;
@@ -992,7 +991,6 @@ export const AIChatbot: React.FC<Props> = ({
                  onDelete={handleDeleteMessage}
                  onRegenerate={handleRegenerate}
                  onEdit={handleEditMessage}
-                 onContinue={handleContinue}
                  onHerbClick={onHerbClick}
                  onCitationClick={handleCitationClick}
                  herbRegex={herbRegex}

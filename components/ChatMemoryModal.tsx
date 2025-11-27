@@ -10,7 +10,7 @@ interface Props {
 }
 
 export const ChatMemoryModal: React.FC<Props> = ({ isOpen, onClose, tokenCount, messageCount, onCompress, isCompressing }) => {
-  const [keepCount, setKeepCount] = useState<number>(10);
+  const [keepCount, setKeepCount] = useState<number>(20);
 
   if (!isOpen) return null;
 
@@ -62,7 +62,7 @@ export const ChatMemoryModal: React.FC<Props> = ({ isOpen, onClose, tokenCount, 
                 <input 
                     type="range" 
                     min="5" 
-                    max="50" 
+                    max="100" 
                     step="5"
                     value={keepCount}
                     onChange={(e) => setKeepCount(parseInt(e.target.value))}
@@ -71,7 +71,11 @@ export const ChatMemoryModal: React.FC<Props> = ({ isOpen, onClose, tokenCount, 
                 <p className="text-xs text-slate-500">
                     AI 将把更早的对话历史概括为一段摘要，仅保留最近的 {keepCount} 轮对话完整内容。
                     <br/>
-                    这有助于在超长对话中保持 AI 的逻辑清晰度，并避免 Token 超限错误。
+                    {messageCount <= keepCount + 1 && (
+                        <span className="text-amber-600 font-bold block mt-1">
+                            当前轮数较少，点击整理将强制合并历史。
+                        </span>
+                    )}
                 </p>
             </div>
         </div>
@@ -80,7 +84,7 @@ export const ChatMemoryModal: React.FC<Props> = ({ isOpen, onClose, tokenCount, 
             <button onClick={onClose} className="px-5 py-2 rounded-lg text-slate-500 font-bold hover:bg-slate-100 transition">取消</button>
             <button 
                 onClick={() => { onCompress(keepCount); onClose(); }}
-                disabled={isCompressing || messageCount <= keepCount + 1}
+                disabled={isCompressing}
                 className="px-6 py-2 rounded-lg bg-indigo-600 text-white font-bold hover:bg-indigo-700 shadow-lg shadow-indigo-200 transition transform active:scale-95 disabled:bg-slate-300 disabled:shadow-none flex items-center gap-2"
             >
                 {isCompressing ? <span className="animate-spin">⏳</span> : <span>🗜️</span>}

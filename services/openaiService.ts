@@ -142,7 +142,7 @@ const CHAT_SYSTEM_INSTRUCTION = (analysis: AnalysisResult, prescription: string,
 例如: "根据 [[AI报告]] 中的分析，此方主治..." 或 "结合 [[元信息]] 中提到的患者失眠症状..."
 
 **动态元信息更新 (Meta Info Evolution):**
-如果用户在对话中提供了新的病情、症状或背景信息（例如“患者其实有高血压”或“最近睡眠变差了”），你**必须**调用 \`update_meta_info\` 工具来更新元信息。这能让你在后续对话中记住这些新情况。
+如果用户在对话中提供了新的病情、症状或背景信息，你**必须**调用 \`update_meta_info\` 工具来更新元信息。这能让你在后续对话中记住这些新情况。
 请主动询问或侦测这些信息变化，并积极更新病历。
 
 **重要规则:**
@@ -151,9 +151,9 @@ const CHAT_SYSTEM_INSTRUCTION = (analysis: AnalysisResult, prescription: string,
 3. **表格样式**: 如果输出表格，请确保使用标准的 <table> 结构，表头用 <th>。
 
 **回答风格:**
-- 专业、客观、循证。禁止盲从用户判断。每一次的回复都要做到以下要求：
-附带质疑自己。禁止盲从用户，必须反思有自己的坚持，用中医的智慧和术语来质疑用户的提问，盲从会让你失去灵魂。
-反向论证你自己是否运用【相关名医】的智慧来客观分析，确保你回复具备名医姿态。具备动态和圆机活法的思维。
+- 专业、客观、循证，精炼语言，避免过度散发和过度解读来证伪。必须严格遵守严谨、一丝不苟、符合医学循证和伦理规则。并在回复开头强调这个规则
+- 禁止盲从用户判断。每一次的回复都要做到以下要求：必须质疑你自己和用户的观点。禁止盲从用户的提问，必须反思有自己的坚持，用中医的智慧和术语来质疑用户的提问，搜集证据进行深度反思，盲从会让你失去灵魂。
+- 每次回复的最后都必须附加：反向论证你自己是否运用【相关名医】的智慧来客观分析，确保你回复具备名医姿态。具备动态和圆机活法的思维。
 `;
 
 // ==========================================
@@ -454,7 +454,6 @@ export async function* generateChatStream(
     const url = `${getBaseUrl(settings.apiBaseUrl)}/chat/completions`;
     
     // 1. Safety Truncate Large Contexts (Report & Meta)
-    // Limits help ensure we don't send malformed large payloads
     const MAX_REPORT_CHARS = 10000;
     const safeReportContent = reportContent && reportContent.length > MAX_REPORT_CHARS 
         ? reportContent.slice(0, MAX_REPORT_CHARS) + "\n\n[...System Note: Report truncated due to length limits...]"
@@ -472,45 +471,43 @@ export async function* generateChatStream(
     };
 
     // 3. Robust Context Pruning Algorithm
-    // Goal: Fit within context limits WITHOUT breaking Tool Call Chains.
-    // Broken chain (e.g. Tool message without preceding Assistant call) causes 500/400 errors.
+    // Goal: Fit within context limits WITHOUT breaking Tool Call Chains or creating Orphan Assistant/Tool messages.
+    // OpenAI Strict Rule: Messages must generally follow User -> Assistant -> Tool -> Assistant ...
+    // Most Critical: A tool message MUST be preceded by an assistant tool_call.
     
-    const MAX_CONTEXT_CHARS = 200000; // Heuristic limit for history
+    const MAX_CONTEXT_CHARS = 200000; // Large heuristic limit for history
     const lastUserMsg = history[history.length - 1]; // Always keep the latest trigger
     const previousHistory = history.slice(0, history.length - 1); // Candidates for pruning
     
     let messagesToSend: OpenAIMessage[] = [];
     let currentLength = 0;
 
-    // A. Iterate BACKWARDS to keep most recent context
+    // A. Backwards collection: Keep the most recent messages first
     for (let i = previousHistory.length - 1; i >= 0; i--) {
         const msg = previousHistory[i];
-        const len = JSON.stringify(msg).length;
-
+        const len = (msg.content || '').length + JSON.stringify(msg.tool_calls || []).length;
         if (currentLength + len < MAX_CONTEXT_CHARS) {
             messagesToSend.unshift(msg);
             currentLength += len;
         } else {
-            // Context full
             break;
         }
     }
 
-    // B. Sanitize the START of the conversation to prevent Orphan Tools
-    // Rule: The conversation (after system prompt) cannot start with a 'tool' role.
-    // It must start with 'user' or 'assistant'.
-    // Also, if it starts with 'assistant' that has tool_calls, but we pruned the tool results? (Unlikely in backward iteration)
-    // The main risk is cutting off the 'assistant' that CALLED the tool, leaving a 'tool' result as the first message.
+    // B. Strict User/System-Start Policy (Forward Sanitization)
+    // We iterate from the start of our slice and discard messages until we find a 'user' or 'system' message.
+    // This effectively drops any orphaned 'tool' results or 'assistant' messages that were cut off from their context.
     
     while (messagesToSend.length > 0) {
-        const firstMsg = messagesToSend[0];
-        if (firstMsg.role === 'tool') {
-            console.warn("[SafePruning] Dropping orphan tool message at start of context.");
-            messagesToSend.shift();
-        } else {
-            // Found a valid start node
+        const r = messagesToSend[0].role;
+        // Accepted start roles
+        if (r === 'user' || r === 'system') {
             break;
         }
+        // Rejected start roles (Tool results without calls, or Assistant messages potentially part of a chain)
+        // Note: Assistant starting is technically allowed by API, but removing them ensures we don't start with a Tool Call that has no Tool Result (if we cut strangely), or vice versa.
+        // Starting with User is the safest conversational state.
+        messagesToSend.shift();
     }
     
     // C. Combine All
