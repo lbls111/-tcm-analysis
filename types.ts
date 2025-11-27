@@ -1,6 +1,8 @@
 
 
 
+
+
 export enum Flavor {
   PUNGENT = '辛',
   BITTER = '苦',
@@ -177,6 +179,25 @@ export interface BenCaoHerb {
   source?: 'local' | 'cloud' | 'pharmacopoeia'; // Data source tracking
 }
 
+// === Cloud Storage Interfaces ===
+
+export interface CloudReport {
+  id: string;
+  prescription: string; // 处方原文
+  content: string; // HTML内容
+  meta: any; // 版本、模式等元数据
+  analysis_result?: any; // 关键计算结果快照
+  created_at: string;
+}
+
+export interface CloudChatSession {
+  id: string;
+  title: string;
+  messages: any[]; // JSONB
+  created_at: number; // Timestamp
+  updated_at?: string; // ISO String from DB
+}
+
 // === AI Settings Interface (Updated for Cloud Deployment) ===
 export interface ModelOption {
   id: string;
@@ -202,5 +223,3 @@ export interface AISettings {
   supabaseUrl?: string;
   supabaseKey?: string;
 }
-
-// Supabase Health Check types are removed as per user request to handle deletion externally.

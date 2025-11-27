@@ -1,8 +1,9 @@
+
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { analyzePrescriptionWithAI, generateHerbDataWithAI, DEFAULT_ANALYZE_SYSTEM_INSTRUCTION, QUICK_ANALYZE_SYSTEM_INSTRUCTION } from './services/openaiService';
 import { calculatePrescription, getPTILabel } from './utils/tcmMath';
 import { parsePrescription } from './utils/prescriptionParser';
-import { AnalysisResult, ViewMode, Constitution, AdministrationMode, BenCaoHerb, AISettings } from './types';
+import { AnalysisResult, ViewMode, Constitution, AdministrationMode, BenCaoHerb, AISettings, CloudReport } from './types';
 import { QiFlowVisualizer } from './components/QiFlowVisualizer';
 import BenCaoDatabase from './components/BenCaoDatabase';
 import { HerbDetailModal } from './components/HerbDetailModal';
@@ -10,6 +11,7 @@ import { AIChatbot } from './components/AIChatbot';
 import { AISettingsModal } from './components/AISettingsModal';
 import { FULL_HERB_LIST, registerDynamicHerb } from './data/herbDatabase';
 import { DEFAULT_SUPABASE_URL, DEFAULT_SUPABASE_KEY } from './constants';
+import { saveCloudReport, fetchCloudReports } from './services/supabaseService';
 
 const PRESET_PRESCRIPTION = "";
 const LS_REPORTS_KEY = "logicmaster_reports";
@@ -39,10 +41,17 @@ function App() {
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
   const [autoFillingHerb, setAutoFillingHerb] = useState<string | null>(null);
+  
+  // Local Reports (Active Session)
   const [reports, setReports] = useState<Record<string, string>>({});
   const [reportMeta, setReportMeta] = useState<Record<string, ReportMeta>>({});
   const [activeReportVersion, setActiveReportVersion] = useState<string>('V1');
   const [isReportIncomplete, setIsReportIncomplete] = useState(false);
+  
+  // Cloud Reports (Archives)
+  const [cloudReports, setCloudReports] = useState<CloudReport[]>([]);
+  const [showReportHistory, setShowReportHistory] = useState(false);
+  const [isSavingCloud, setIsSavingCloud] = useState(false);
   
   const [fontSettings, setFontSettings] = useState({
     family: 'font-serif-sc', 
@@ -154,6 +163,19 @@ function App() {
     }
   }, [activeReportVersion, reports, view]);
 
+  // Load Cloud Reports
+  useEffect(() => {
+      const loadHistory = async () => {
+          if (aiSettings.supabaseKey) {
+             const history = await fetchCloudReports(aiSettings);
+             setCloudReports(history);
+          }
+      };
+      if (view === ViewMode.REPORT) {
+          loadHistory();
+      }
+  }, [view, aiSettings.supabaseKey]); // Refresh when view changes or key changes
+
   // =========================================================
   // Herb Recognition Logic for Report (Memoized)
   // =========================================================
@@ -221,6 +243,45 @@ function App() {
       }));
       setIsReportIncomplete(false);
       setAiError(null);
+  };
+  
+  // Save Report to Cloud Helper
+  const saveCurrentReportToCloud = async (version: string, htmlContent: string, mode: string, isManual: boolean = false) => {
+      if (!aiSettings.supabaseKey || !analysis) {
+          if (isManual) alert("保存失败：未配置云数据库或缺少分析数据。");
+          return;
+      }
+      
+      if (isManual) setIsSavingCloud(true);
+      
+      console.log(`[Cloud] Uploading report version ${version}...`);
+      const success = await saveCloudReport({
+          prescription: input,
+          content: htmlContent,
+          meta: { version, mode, model: aiSettings.analysisModel },
+          analysis_result: { top3: analysis.top3, totalPTI: analysis.totalPTI }
+      }, aiSettings);
+      
+      if (isManual) {
+          setIsSavingCloud(false);
+          if (success) {
+              alert("☁️ 报告已成功保存至云端！\n您可以在“历史存档”中随时查看。");
+          } else {
+              alert("❌ 保存失败。\n请检查 Supabase 连接，或确认是否已运行数据库初始化 SQL (需包含 'reports' 表)。");
+          }
+      }
+      
+      // Refresh list quietly
+      if (success) {
+          fetchCloudReports(aiSettings).then(setCloudReports);
+      }
+  };
+
+  const handleManualCloudSave = () => {
+      const content = reports[activeReportVersion];
+      const meta = reportMeta[activeReportVersion];
+      if (!content || !meta) return;
+      saveCurrentReportToCloud(activeReportVersion, content, meta.mode, true);
   };
 
   // Updated handleAskAI to support Quick/Deep modes with correct versioning logic
@@ -308,6 +369,11 @@ function App() {
 
       const isComplete = htmlContent.trim().endsWith('</html>');
       setIsReportIncomplete(!isComplete);
+      
+      // Auto Save to Cloud on Completion (Optional, kept for convenience but manual button added)
+      if (isComplete) {
+          saveCurrentReportToCloud(versionToUse, htmlContent, targetMode, false);
+      }
 
     } catch (err: any) {
       if (err.name === 'AbortError') {
@@ -316,13 +382,6 @@ function App() {
       }
       console.error(err);
       setAiError(err.message || "请求 AI 时发生未知错误");
-      
-      // If it was a NEW version and failed completely, maybe remove it?
-      if (mode !== 'regenerate' && !reports[versionToUse]) {
-          // If we reused an empty slot, maybe don't delete? 
-          // But if we created V2 and it failed, we might want to revert.
-          // For now, keep it simple.
-      }
     } finally {
       setAiLoading(false);
       abortControllerRef.current = null;
@@ -338,7 +397,6 @@ function App() {
     const controller = new AbortController();
     abortControllerRef.current = controller;
     
-    // Determine which prompt to use based on the report's mode
     const currentMode = reportMeta[activeReportVersion]?.mode || 'deep';
     const sysPrompt = currentMode === 'quick' ? QUICK_ANALYZE_SYSTEM_INSTRUCTION : DEFAULT_ANALYZE_SYSTEM_INSTRUCTION;
 
@@ -363,6 +421,11 @@ function App() {
       
       const isNowComplete = finalContent.trim().endsWith('</html>');
       setIsReportIncomplete(!isNowComplete);
+
+      // Auto Save to Cloud on Completion
+      if (isNowComplete) {
+        saveCurrentReportToCloud(activeReportVersion, finalContent, currentMode, false);
+      }
 
     } catch (err: any) {
       if (err.name === 'AbortError') return;
@@ -423,8 +486,6 @@ function App() {
   };
 
   const handleDeleteReportVersion = () => {
-    // Correct check: check if the key exists in the object, not if the value is truthy.
-    // An empty report (value='') is still a valid version that can be deleted.
     if (!activeReportVersion || !(activeReportVersion in reports)) return;
     
     if (!window.confirm(`确定要删除版本 ${activeReportVersion} 吗？`)) return;
@@ -450,6 +511,26 @@ function App() {
         setActiveReportVersion('');
         setIsReportIncomplete(false);
     }
+  };
+  
+  const loadCloudReportToLocal = (cloudReport: CloudReport) => {
+      // 1. Set Input & Calculate
+      setInput(cloudReport.prescription);
+      const herbs = parsePrescription(cloudReport.prescription);
+      const result = calculatePrescription(herbs);
+      setAnalysis(result);
+      setInitialDosageRef(result.initialTotalDosage);
+      
+      // 2. Set Report Content
+      // Create a virtual version name
+      const importVer = `Cloud-${new Date(cloudReport.created_at).toLocaleDateString().replace(/\//g,'')}`;
+      setReports({[importVer]: cloudReport.content});
+      setReportMeta({[importVer]: { mode: cloudReport.meta?.mode || 'deep', timestamp: Date.now() }});
+      setActiveReportVersion(importVer);
+      
+      // 3. Switch View
+      setView(ViewMode.REPORT);
+      setShowReportHistory(false);
   };
 
   const handleHerbClick = (herbName: string, mappedFrom?: string) => {
@@ -572,6 +653,53 @@ function App() {
           settings={aiSettings}
           onSave={setAiSettings}
       />
+      
+      {/* Cloud Report History Sidebar */}
+      {showReportHistory && (
+         <div className="fixed inset-0 z-[60] bg-slate-900/30 backdrop-blur-sm flex justify-end" onClick={() => setShowReportHistory(false)}>
+             <div 
+                 className="w-full max-w-md bg-white h-full shadow-2xl p-6 flex flex-col animate-in slide-in-from-right duration-300"
+                 onClick={e => e.stopPropagation()}
+             >
+                 <div className="flex justify-between items-center mb-6">
+                     <h3 className="text-xl font-bold font-serif-sc text-slate-800 flex items-center gap-2">
+                        <span>☁️</span> 云端报告存档
+                     </h3>
+                     <button onClick={() => setShowReportHistory(false)} className="text-slate-400 hover:text-slate-600 text-xl">✕</button>
+                 </div>
+                 
+                 <div className="flex-1 overflow-y-auto space-y-3 custom-scrollbar">
+                     {cloudReports.length === 0 ? (
+                         <div className="text-center py-20 text-slate-400 text-sm">暂无云端存档。</div>
+                     ) : (
+                         cloudReports.map(r => (
+                             <div 
+                                 key={r.id}
+                                 onClick={() => loadCloudReportToLocal(r)}
+                                 className="p-4 border border-slate-100 rounded-xl bg-slate-50 hover:bg-indigo-50 hover:border-indigo-200 cursor-pointer transition-all group"
+                             >
+                                 <div className="flex justify-between items-start mb-2">
+                                     <span className="text-xs font-mono text-slate-400 bg-white px-1.5 py-0.5 rounded border border-slate-100">
+                                         {new Date(r.created_at).toLocaleDateString()}
+                                     </span>
+                                     <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${r.meta?.mode === 'quick' ? 'bg-amber-100 text-amber-700 border-amber-200' : 'bg-indigo-100 text-indigo-700 border-indigo-200'}`}>
+                                         {r.meta?.mode === 'quick' ? '快速' : '深度'}
+                                     </span>
+                                 </div>
+                                 <div className="text-sm font-bold text-slate-700 line-clamp-2 mb-2 font-serif-sc">
+                                     {r.prescription}
+                                 </div>
+                                 <div className="flex items-center gap-2 text-[10px] text-slate-400">
+                                     <span>{r.analysis_result?.top3?.[0]?.name ? `核心: ${r.analysis_result.top3[0].name}` : ''}</span>
+                                     <span className="ml-auto opacity-0 group-hover:opacity-100 text-indigo-600 font-bold transition-opacity">加载 →</span>
+                                 </div>
+                             </div>
+                         ))
+                     )}
+                 </div>
+             </div>
+         </div>
+      )}
 
       {view !== ViewMode.INPUT && (
         <header className="fixed top-0 z-50 w-full h-16 bg-white/80 backdrop-blur-xl border-b border-white shadow-sm flex items-center justify-between px-6 transition-all">
@@ -597,7 +725,7 @@ function App() {
                 className={`px-5 py-1.5 rounded-full text-xs font-bold transition-all ${
                   view === tab.id 
                     ? 'bg-white text-indigo-700 shadow-sm ring-1 ring-black/5' 
-                    : 'text-slate-500 hover:text-slate-800 hover:bg-white/50'
+                    : 'text-slate-500 hover:text-slate-800 hover:text-indigo-600'
                 }`}
               >
                 {tab.label}
@@ -828,10 +956,25 @@ function App() {
                             ) : (
                                 <>
                                     <button 
+                                        onClick={handleManualCloudSave} 
+                                        disabled={isSavingCloud}
+                                        className="text-xs font-bold text-emerald-600 bg-emerald-50 px-3 py-2 rounded-lg border border-emerald-100 hover:bg-emerald-100 flex items-center gap-1 transition-all"
+                                    >
+                                        {isSavingCloud ? <span className="animate-spin">⏳</span> : <span>☁️</span>}
+                                        {isSavingCloud ? '保存中...' : '保存到云端'}
+                                    </button>
+
+                                    <button 
                                         onClick={handleResetCurrentVersion} 
                                         className="text-xs font-bold text-indigo-600 bg-indigo-50 px-3 py-2 rounded-lg border border-indigo-100 hover:bg-indigo-100 flex items-center gap-1"
                                     >
                                         <span>↺</span> 重置并重新生成
+                                    </button>
+                                    <button 
+                                        onClick={() => setShowReportHistory(true)} 
+                                        className="text-xs font-bold text-slate-600 bg-white px-3 py-2 rounded-lg border border-slate-200 hover:bg-slate-50 flex items-center gap-1"
+                                    >
+                                        <span>📂</span> 历史存档
                                     </button>
                                     <button 
                                         onClick={handleCopyHtml} 
@@ -948,6 +1091,15 @@ function App() {
                                 </button>
                             </div>
                             
+                            <div className="flex justify-center mt-8">
+                                <button 
+                                    onClick={() => setShowReportHistory(true)} 
+                                    className="text-xs font-bold text-slate-600 bg-white px-4 py-2 rounded-lg border border-slate-200 hover:bg-slate-50 flex items-center gap-2"
+                                >
+                                    <span>☁️</span> 查看云端历史报告
+                                </button>
+                            </div>
+
                             <button 
                                 onClick={() => setView(ViewMode.INPUT)} 
                                 className="mt-8 text-sm text-slate-400 hover:text-slate-600 underline block mx-auto"

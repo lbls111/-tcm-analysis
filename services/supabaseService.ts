@@ -1,6 +1,6 @@
 
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import { AISettings, BenCaoHerb } from '../types';
+import { AISettings, BenCaoHerb, CloudReport, CloudChatSession } from '../types';
 
 let supabase: SupabaseClient | null = null;
 let currentSettings: { url: string; key: string } | null = null;
@@ -26,7 +26,10 @@ export const getSupabaseClient = (settings: AISettings): SupabaseClient | null =
   return supabase;
 };
 
-// Fetch all custom herbs from Cloud
+// ==========================================
+// Herbs (Pharmacopoeia)
+// ==========================================
+
 export const fetchCloudHerbs = async (settings: AISettings): Promise<BenCaoHerb[]> => {
   const client = getSupabaseClient(settings);
   if (!client) return [];
@@ -38,7 +41,7 @@ export const fetchCloudHerbs = async (settings: AISettings): Promise<BenCaoHerb[
 
     if (error) {
       if (error.code === '42P01' || error.message.includes('Could not find the table')) { 
-          console.warn("[Supabase] Table 'herbs' does not exist. Please run the setup SQL.");
+          console.warn("[Supabase] Table 'herbs' does not exist.");
           return []; 
       } else {
           console.error("Error fetching herbs from Supabase:", error.message);
@@ -67,7 +70,6 @@ export const fetchCloudHerbs = async (settings: AISettings): Promise<BenCaoHerb[
   }
 };
 
-// Insert a new herb into Cloud
 export const insertCloudHerb = async (herb: BenCaoHerb, settings: AISettings): Promise<boolean> => {
   const client = getSupabaseClient(settings);
   if (!client) return false;
@@ -99,7 +101,6 @@ export const insertCloudHerb = async (herb: BenCaoHerb, settings: AISettings): P
   }
 };
 
-// Update an existing herb in Cloud
 export const updateCloudHerb = async (id: string, herb: BenCaoHerb, settings: AISettings): Promise<boolean> => {
   const client = getSupabaseClient(settings);
   if (!client) return false;
@@ -116,7 +117,6 @@ export const updateCloudHerb = async (id: string, herb: BenCaoHerb, settings: AI
         processing: herb.processing
     };
 
-    // Use name as the primary reliable key for updates
     const { error, count } = await client
       .from('herbs')
       .update(payload)
@@ -127,12 +127,9 @@ export const updateCloudHerb = async (id: string, herb: BenCaoHerb, settings: AI
       return false;
     }
     if (count === 0) {
-        console.warn(`[Supabase] Update by name '${herb.name}' affected 0 rows. Attempting to update by ID '${id}' as a fallback.`);
+        // Fallback update by ID
         const { error: idError } = await client.from('herbs').update(payload).eq('id', id);
-        if (idError) {
-             console.error("Error updating herb by ID fallback:", idError.message);
-             return false;
-        }
+        if (idError) return false;
     }
     return true;
   } catch (e) {
@@ -141,7 +138,6 @@ export const updateCloudHerb = async (id: string, herb: BenCaoHerb, settings: AI
   }
 };
 
-// Bulk Upsert Herbs
 export const bulkUpsertHerbs = async (herbs: BenCaoHerb[], settings: AISettings): Promise<{ success: number, failed: number, error?: string }> => {
     const client = getSupabaseClient(settings);
     if (!client) return { success: 0, failed: herbs.length };
@@ -165,18 +161,17 @@ export const bulkUpsertHerbs = async (herbs: BenCaoHerb[], settings: AISettings)
         const BATCH_SIZE = 100;
         for (let i = 0; i < payload.length; i += BATCH_SIZE) {
             const batch = payload.slice(i, i + BATCH_SIZE);
-            console.log(`[Supabase] Upserting batch ${i / BATCH_SIZE + 1}...`);
-            const { error, count } = await client
+            const { error } = await client
                 .from('herbs')
                 .upsert(batch, { onConflict: 'name' });
 
             if (error) {
-                console.error(`Batch upsert error (${i}-${i+BATCH_SIZE}):`, error);
+                console.error(`Batch upsert error:`, error);
                 if (error.code === 'PGRST205' || error.message.includes('Could not find the table')) {
                     errorMessage = "Could not find the table 'public.herbs'.";
                 }
                 failedCount += batch.length;
-                if(errorMessage) break; // Stop on critical error like table not found
+                if(errorMessage) break; 
             } else {
                 successCount += batch.length;
             }
@@ -191,7 +186,133 @@ export const bulkUpsertHerbs = async (herbs: BenCaoHerb[], settings: AISettings)
       failedCount = herbs.length;
       successCount = 0;
     }
-
-    console.log(`[Supabase] Bulk upsert complete. Success: ${successCount}, Failed: ${failedCount}`);
     return { success: successCount, failed: failedCount, error: errorMessage };
+};
+
+
+// ==========================================
+// AI Reports
+// ==========================================
+
+export const fetchCloudReports = async (settings: AISettings): Promise<CloudReport[]> => {
+    const client = getSupabaseClient(settings);
+    if (!client) return [];
+  
+    try {
+      const { data, error } = await client
+        .from('reports')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(50); // Limit to recent 50
+  
+      if (error) {
+        if (!error.message.includes('Could not find the table')) {
+             console.error("Error fetching reports:", error.message);
+        }
+        return [];
+      }
+      return data as CloudReport[];
+    } catch (e) {
+      console.error("Supabase report fetch exception:", e);
+      return [];
+    }
+};
+
+export const saveCloudReport = async (report: Omit<CloudReport, 'id' | 'created_at'>, settings: AISettings): Promise<boolean> => {
+    const client = getSupabaseClient(settings);
+    if (!client) return false;
+
+    try {
+        const { error } = await client
+            .from('reports')
+            .insert(report);
+
+        if (error) {
+            console.error("Error saving report:", error.message);
+            return false;
+        }
+        return true;
+    } catch (e) {
+        console.error("Supabase report save exception:", e);
+        return false;
+    }
+};
+
+export const deleteCloudReport = async (id: string, settings: AISettings): Promise<boolean> => {
+    const client = getSupabaseClient(settings);
+    if (!client) return false;
+    
+    try {
+        const { error } = await client.from('reports').delete().eq('id', id);
+        return !error;
+    } catch(e) {
+        return false;
+    }
+};
+
+
+// ==========================================
+// Chat Sessions
+// ==========================================
+
+export const fetchCloudChatSessions = async (settings: AISettings): Promise<CloudChatSession[]> => {
+    const client = getSupabaseClient(settings);
+    if (!client) return [];
+  
+    try {
+      const { data, error } = await client
+        .from('chat_sessions')
+        .select('*')
+        .order('created_at', { ascending: false });
+  
+      if (error) {
+        if (!error.message.includes('Could not find the table')) {
+            console.error("Error fetching chats:", error.message);
+        }
+        return [];
+      }
+      return data as CloudChatSession[];
+    } catch (e) {
+      console.error("Supabase chat fetch exception:", e);
+      return [];
+    }
+};
+
+export const saveCloudChatSession = async (session: CloudChatSession, settings: AISettings): Promise<boolean> => {
+    const client = getSupabaseClient(settings);
+    if (!client) return false;
+
+    try {
+        const payload = {
+            id: session.id,
+            title: session.title,
+            messages: session.messages,
+            created_at: session.created_at
+        };
+
+        const { error } = await client
+            .from('chat_sessions')
+            .upsert(payload);
+
+        if (error) {
+            console.error("Error saving chat session:", error.message);
+            return false;
+        }
+        return true;
+    } catch (e) {
+        console.error("Supabase chat save exception:", e);
+        return false;
+    }
+};
+
+export const deleteCloudChatSession = async (id: string, settings: AISettings): Promise<boolean> => {
+    const client = getSupabaseClient(settings);
+    if (!client) return false;
+    
+    try {
+        const { error } = await client.from('chat_sessions').delete().eq('id', id);
+        return !error;
+    } catch(e) {
+        return false;
+    }
 };

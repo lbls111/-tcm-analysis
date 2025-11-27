@@ -1,9 +1,4 @@
 
-
-
-
-
-
 import React, { useState } from 'react';
 import { AISettings } from '../types';
 import { fetchAvailableModels, testModelConnection, DEFAULT_ANALYZE_SYSTEM_INSTRUCTION } from '../services/openaiService';
@@ -23,8 +18,7 @@ export const AISettingsModal: React.FC<Props> = ({ isOpen, onClose, settings, on
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'api' | 'cloud'>('api');
-  
-  // Health Check State Removed
+  const [showSqlGuide, setShowSqlGuide] = useState(false);
 
   // Sync when opening
   React.useEffect(() => {
@@ -110,6 +104,52 @@ export const AISettingsModal: React.FC<Props> = ({ isOpen, onClose, settings, on
            window.location.reload();
        }
     }
+  };
+  
+  const copySqlToClipboard = () => {
+      const sql = `-- 1. 药材表 (herbs)
+create table if not exists herbs (
+  id uuid default gen_random_uuid() primary key,
+  name text not null unique,
+  nature text,
+  flavors jsonb,
+  meridians jsonb,
+  efficacy text,
+  usage text,
+  category text,
+  processing text,
+  is_raw boolean default false,
+  created_at timestamp with time zone default timezone('utc'::text, now())
+);
+
+-- 2. 报告表 (reports)
+create table if not exists reports (
+  id uuid default gen_random_uuid() primary key,
+  prescription text,
+  content text,
+  meta jsonb,
+  analysis_result jsonb,
+  created_at timestamp with time zone default timezone('utc'::text, now())
+);
+
+-- 3. 聊天会话表 (chat_sessions)
+create table if not exists chat_sessions (
+  id text primary key,
+  title text,
+  messages jsonb,
+  created_at bigint
+);
+
+-- 4. 开启所有表的公开读写权限 (仅限 Demo/单用户模式)
+alter table herbs enable row level security;
+alter table reports enable row level security;
+alter table chat_sessions enable row level security;
+
+create policy "Public access herbs" on herbs for all using (true) with check (true);
+create policy "Public access reports" on reports for all using (true) with check (true);
+create policy "Public access chats" on chat_sessions for all using (true) with check (true);`;
+      navigator.clipboard.writeText(sql);
+      alert("全量初始化 SQL 已复制！请前往 Supabase Dashboard -> SQL Editor 粘贴运行。");
   };
   
   const isUsingDefaultCloud = localSettings.supabaseUrl === DEFAULT_SUPABASE_URL;
@@ -380,13 +420,78 @@ export const AISettingsModal: React.FC<Props> = ({ isOpen, onClose, settings, on
                     </div>
                   </div>
                   <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm space-y-5">
-                     <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
-                        <span className="w-2 h-6 bg-cyan-500 rounded-full"></span> 数据库状态
-                    </h3>
+                     <div className="flex justify-between items-center">
+                         <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                            <span className="w-2 h-6 bg-cyan-500 rounded-full"></span> 数据库初始化
+                        </h3>
+                        <button 
+                            onClick={() => setShowSqlGuide(!showSqlGuide)}
+                            className="px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-xs font-bold transition-colors"
+                        >
+                            {showSqlGuide ? '收起 SQL' : '查看初始化 SQL'}
+                        </button>
+                     </div>
                     <p className="text-sm text-slate-500">
-                        数据管理（删除、清空）功能已移至您的 Supabase 后台，以确保操作的安全性和可追溯性。
-                        您可以通过“批量导入”工具中的“数据库初始化”来创建或检查您的数据表结构。
+                        如果您的云端无法保存聊天记录或报告，可能是因为数据表尚未创建。请点击右侧按钮获取初始化代码。
                     </p>
+
+                    {showSqlGuide && (
+                        <div className="bg-slate-900 rounded-xl overflow-hidden mt-4 relative group">
+                            <div className="bg-slate-800 px-4 py-2 text-xs text-slate-400 font-bold uppercase border-b border-slate-700 flex justify-between items-center">
+                                <span>SQL Editor Input</span>
+                                <span className="text-[10px] text-emerald-400">All Tables (Herbs, Reports, Chats)</span>
+                            </div>
+                            <pre className="p-4 text-xs text-emerald-400 font-mono overflow-x-auto custom-scrollbar max-h-60">
+{`-- 1. 药材表 (herbs)
+create table if not exists herbs (
+  id uuid default gen_random_uuid() primary key,
+  name text not null unique,
+  nature text,
+  flavors jsonb,
+  meridians jsonb,
+  efficacy text,
+  usage text,
+  category text,
+  processing text,
+  is_raw boolean default false,
+  created_at timestamp with time zone default timezone('utc'::text, now())
+);
+
+-- 2. 报告表 (reports)
+create table if not exists reports (
+  id uuid default gen_random_uuid() primary key,
+  prescription text,
+  content text,
+  meta jsonb,
+  analysis_result jsonb,
+  created_at timestamp with time zone default timezone('utc'::text, now())
+);
+
+-- 3. 聊天会话表 (chat_sessions)
+create table if not exists chat_sessions (
+  id text primary key,
+  title text,
+  messages jsonb,
+  created_at bigint
+);
+
+-- 4. 开启所有表的公开读写权限 (RLS)
+alter table herbs enable row level security;
+alter table reports enable row level security;
+alter table chat_sessions enable row level security;
+
+create policy "Public access herbs" on herbs for all using (true) with check (true);
+create policy "Public access reports" on reports for all using (true) with check (true);
+create policy "Public access chats" on chat_sessions for all using (true) with check (true);`}
+                            </pre>
+                            <button 
+                                onClick={copySqlToClipboard}
+                                className="absolute top-12 right-4 bg-white/10 hover:bg-white/20 text-white px-3 py-1 rounded text-xs backdrop-blur-md transition-colors"
+                            >
+                                复制代码
+                            </button>
+                        </div>
+                    )}
                   </div>
               </div>
           )}

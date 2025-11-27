@@ -1,5 +1,4 @@
 
-
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { generateChatStream, OpenAIMessage, OpenAIToolCall } from '../services/openaiService';
 import { AnalysisResult, AISettings } from '../types';
@@ -7,6 +6,7 @@ import { searchHerbsForAI, FULL_HERB_LIST } from '../data/herbDatabase';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
+import { fetchCloudChatSessions, saveCloudChatSession, deleteCloudChatSession } from '../services/supabaseService';
 
 // ==========================================
 // 1. Types
@@ -284,6 +284,7 @@ export const AIChatbot: React.FC<Props> = ({
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isToolExecuting, setIsToolExecuting] = useState(false);
+  const [isSavingCloud, setIsSavingCloud] = useState(false);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -307,27 +308,50 @@ export const AIChatbot: React.FC<Props> = ({
 
   // --- Data Loading & Persistence ---
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem(LS_CHAT_SESSIONS_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (parsed && typeof parsed === 'object') {
-          setSessions(parsed);
-          const lastActive = localStorage.getItem('logicmaster_last_active_session');
-          if (lastActive && parsed[lastActive]) {
-            setActiveSessionId(lastActive);
-          } else {
-            const ids = Object.keys(parsed).sort((a, b) => parsed[b].createdAt - parsed[a].createdAt);
-            if (ids.length > 0) setActiveSessionId(ids[0]);
-          }
+    // 1. Try Load from Cloud first (if key exists)
+    const init = async () => {
+        let loadedFromCloud = false;
+        if (settings.supabaseKey) {
+            const cloudSessions = await fetchCloudChatSessions(settings);
+            if (cloudSessions.length > 0) {
+                const sessionMap: Record<string, Session> = {};
+                cloudSessions.forEach(cs => {
+                    sessionMap[cs.id] = {
+                        id: cs.id,
+                        title: cs.title,
+                        messages: cs.messages,
+                        createdAt: cs.created_at
+                    };
+                });
+                setSessions(sessionMap);
+                setActiveSessionId(cloudSessions[0].id);
+                loadedFromCloud = true;
+            }
         }
-      }
-    } catch (e) {
-      console.error("Failed to load sessions", e);
-    }
-    
-    // Defer creation to ensure we check state first
-    setTimeout(() => {
+
+        if (!loadedFromCloud) {
+             // 2. Fallback to LocalStorage
+            try {
+                const saved = localStorage.getItem(LS_CHAT_SESSIONS_KEY);
+                if (saved) {
+                    const parsed = JSON.parse(saved);
+                    if (parsed && typeof parsed === 'object') {
+                        setSessions(parsed);
+                        const lastActive = localStorage.getItem('logicmaster_last_active_session');
+                        if (lastActive && parsed[lastActive]) {
+                            setActiveSessionId(lastActive);
+                        } else {
+                            const ids = Object.keys(parsed).sort((a, b) => parsed[b].createdAt - parsed[a].createdAt);
+                            if (ids.length > 0) setActiveSessionId(ids[0]);
+                        }
+                    }
+                }
+            } catch (e) {
+                console.error("Failed to load sessions", e);
+            }
+        }
+        
+        // 3. Ensure at least one session exists
         setSessions(current => {
             if (Object.keys(current).length === 0) {
                  const newId = `session_${Date.now()}`;
@@ -338,13 +362,24 @@ export const AIChatbot: React.FC<Props> = ({
                     messages: [{ role: 'model', text: '我是您的 AI 中医助手。我可以帮您分析处方，或查阅药典数据。请问您想了解什么？' }],
                  };
                  setActiveSessionId(newId);
+                 // Sync new session to cloud immediately if connected
+                 if (settings.supabaseKey) {
+                     saveCloudChatSession({
+                         id: newSession.id,
+                         title: newSession.title,
+                         messages: newSession.messages,
+                         created_at: newSession.createdAt
+                     }, settings);
+                 }
                  return { [newId]: newSession };
             }
             return current;
         });
-    }, 0);
-  }, []);
+    };
+    init();
+  }, [settings.supabaseKey]); // Re-run when key changes
 
+  // Save to LocalStorage & Cloud on change
   useEffect(() => {
     if (Object.keys(sessions).length > 0) {
       localStorage.setItem(LS_CHAT_SESSIONS_KEY, JSON.stringify(sessions));
@@ -352,7 +387,22 @@ export const AIChatbot: React.FC<Props> = ({
     if (activeSessionId) {
       localStorage.setItem('logicmaster_last_active_session', activeSessionId);
     }
-  }, [sessions, activeSessionId]);
+    
+    // Cloud Sync Logic (Debounce needed in real world, but for now we sync active session)
+    if (activeSessionId && sessions[activeSessionId] && settings.supabaseKey) {
+        const sess = sessions[activeSessionId];
+        // Only sync if messages > 1 (not just welcome msg)
+        if (sess.messages.length > 1) {
+             saveCloudChatSession({
+                 id: sess.id,
+                 title: sess.title,
+                 messages: sess.messages,
+                 created_at: sess.createdAt
+             }, settings).catch(e => console.error("Cloud sync failed", e));
+        }
+    }
+
+  }, [sessions, activeSessionId, settings]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -376,7 +426,41 @@ export const AIChatbot: React.FC<Props> = ({
     };
     setSessions(prev => ({ ...prev, [newId]: newSession }));
     setActiveSessionId(newId);
+    
+    if (settings.supabaseKey) {
+         saveCloudChatSession({
+             id: newSession.id,
+             title: newSession.title,
+             messages: newSession.messages,
+             created_at: newSession.createdAt
+         }, settings);
+    }
     return newId;
+  };
+  
+  const handleManualSave = async () => {
+      if (!activeSessionId || !sessions[activeSessionId]) return;
+      if (!settings.supabaseKey) {
+          alert("保存失败：未配置 Supabase 连接。");
+          return;
+      }
+      
+      setIsSavingCloud(true);
+      const sess = sessions[activeSessionId];
+      const success = await saveCloudChatSession({
+          id: sess.id,
+          title: sess.title,
+          messages: sess.messages,
+          created_at: sess.createdAt
+      }, settings);
+      
+      setIsSavingCloud(false);
+      
+      if (success) {
+          alert("☁️ 会话已同步到云端数据库。");
+      } else {
+          alert("❌ 同步失败。\n请确认您是否已运行数据库初始化 SQL (需包含 'chat_sessions' 表)。");
+      }
   };
 
   const deleteSession = (id: string, e?: React.MouseEvent) => {
@@ -388,6 +472,11 @@ export const AIChatbot: React.FC<Props> = ({
     }
     
     if (!window.confirm("确认删除此会话记录吗？")) return;
+    
+    // Cloud delete
+    if (settings.supabaseKey) {
+        deleteCloudChatSession(id, settings);
+    }
     
     setSessions(prev => {
       const next = { ...prev };
@@ -718,13 +807,25 @@ export const AIChatbot: React.FC<Props> = ({
                <span className="text-[10px] bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full border border-slate-200">
                  {settings.chatModel || 'Default Model'}
                </span>
-               <span className="text-[10px] bg-emerald-50 text-emerald-600 px-2 py-0.5 rounded-full border border-emerald-100">
-                 药典已连接
+               <span className={`text-[10px] px-2 py-0.5 rounded-full border ${settings.supabaseKey ? 'bg-emerald-50 text-emerald-600 border-emerald-100' : 'bg-amber-50 text-amber-600 border-amber-100'}`}>
+                 {settings.supabaseKey ? '☁️ 云同步开启' : '📁 本地模式'}
                </span>
              </h3>
            </div>
-           <div className="md:hidden">
-              <button onClick={() => createNewSession()} className="text-indigo-600 text-sm font-bold">新会话</button>
+           
+           <div className="flex items-center gap-2">
+               <button 
+                   onClick={handleManualSave}
+                   disabled={isSavingCloud || !settings.supabaseKey}
+                   className="hidden md:flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-50 text-emerald-600 border border-emerald-100 text-xs font-bold hover:bg-emerald-100 transition-colors disabled:opacity-50"
+                   title="手动保存当前会话到云端"
+               >
+                   {isSavingCloud ? <span className="animate-spin">⏳</span> : <span>☁️</span>}
+                   {isSavingCloud ? '同步中' : '保存会话'}
+               </button>
+               <div className="md:hidden">
+                  <button onClick={() => createNewSession()} className="text-indigo-600 text-sm font-bold">新会话</button>
+               </div>
            </div>
         </div>
 
