@@ -18,6 +18,7 @@ const LS_REPORTS_KEY = "logicmaster_reports";
 const LS_REPORTS_META_KEY = "logicmaster_reports_meta";
 const LS_SETTINGS_KEY = "logicmaster_settings";
 const LS_AI_SETTINGS_KEY = "logicmaster_ai_settings";
+const LS_META_INFO_KEY = "logicmaster_meta_info"; // New Key
 const DEFAULT_API_URL = "https://lbls888-lap.hf.space/v1";
 
 type ReportMode = 'quick' | 'deep';
@@ -38,6 +39,7 @@ const sortVersions = (versions: string[]) => {
 function App() {
   const [view, setView] = useState<ViewMode>(ViewMode.INPUT);
   const [input, setInput] = useState(PRESET_PRESCRIPTION);
+  const [metaInfo, setMetaInfo] = useState(''); // New State for Meta Info
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
   const [autoFillingHerb, setAutoFillingHerb] = useState<string | null>(null);
@@ -110,6 +112,11 @@ function App() {
       } catch (e) {}
     }
     
+    const savedMetaInfo = localStorage.getItem(LS_META_INFO_KEY);
+    if (savedMetaInfo) {
+        setMetaInfo(savedMetaInfo);
+    }
+    
     const savedAISettings = localStorage.getItem(LS_AI_SETTINGS_KEY);
     if (savedAISettings) {
       try {
@@ -152,6 +159,10 @@ function App() {
   useEffect(() => {
     localStorage.setItem(LS_AI_SETTINGS_KEY, JSON.stringify(aiSettings));
   }, [aiSettings]);
+  
+  useEffect(() => {
+      localStorage.setItem(LS_META_INFO_KEY, metaInfo);
+  }, [metaInfo]);
   
   useEffect(() => {
     if (view === ViewMode.REPORT && reports[activeReportVersion]) {
@@ -1133,6 +1144,8 @@ function App() {
                     onRegenerateReport={(instr) => handleAskAI('regenerate', instr)}
                     onHerbClick={handleHerbClick}
                     settings={aiSettings}
+                    metaInfo={metaInfo}
+                    onUpdateMetaInfo={setMetaInfo}
                  />
              )}
         </div>

@@ -7,6 +7,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
 import { fetchCloudChatSessions, saveCloudChatSession, deleteCloudChatSession } from '../services/supabaseService';
+import { MetaInfoModal } from './MetaInfoModal';
 
 // ==========================================
 // 1. Types
@@ -36,6 +37,8 @@ interface Props {
   onRegenerateReport?: (instructions: string) => void;
   onHerbClick?: (herbName: string) => void;
   settings: AISettings;
+  metaInfo: string;
+  onUpdateMetaInfo: (info: string) => void;
 }
 
 const LS_CHAT_SESSIONS_KEY = "logicmaster_chat_sessions";
@@ -62,6 +65,7 @@ interface MessageItemProps {
   onEdit: (index: number, newText: string, resend: boolean) => void;
   onContinue: () => void;
   onHerbClick?: (herbName: string) => void;
+  onCitationClick: (type: 'report' | 'meta') => void;
   herbRegex: RegExp;
 }
 
@@ -79,6 +83,19 @@ const HerbPill: React.FC<{name: string, onClick: (name: string) => void}> = ({ n
     </span>
 );
 
+const CitationLink: React.FC<{type: 'report' | 'meta', onClick: () => void}> = ({ type, onClick }) => (
+    <span 
+      onClick={(e) => {
+          e.preventDefault();
+          onClick();
+      }}
+      className={`inline-flex items-center gap-1 mx-1 px-1.5 py-0.5 rounded text-xs font-bold cursor-pointer transition-all transform hover:-translate-y-0.5 align-middle shadow-sm select-none border ${type === 'report' ? 'bg-fuchsia-50 text-fuchsia-700 border-fuchsia-200 hover:bg-fuchsia-100' : 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100'}`}
+    >
+        <span>{type === 'report' ? '📑' : '🧠'}</span>
+        {type === 'report' ? 'AI报告' : '元信息'}
+    </span>
+);
+
 const ChatMessageItem: React.FC<MessageItemProps> = ({ 
   message, 
   index, 
@@ -89,6 +106,7 @@ const ChatMessageItem: React.FC<MessageItemProps> = ({
   onEdit,
   onContinue,
   onHerbClick,
+  onCitationClick,
   herbRegex
 }) => {
   const [isEditing, setIsEditing] = useState(false);
@@ -121,12 +139,25 @@ const ChatMessageItem: React.FC<MessageItemProps> = ({
       // 1. Split text by protected segments (HTML tags or Markdown links)
       // This regex matches <...> OR [ ... ](...) OR ![ ... ](...)
       const protectedRegex = /(<[^>]+>|\[.*?\]\(.*?\)|!\[.*?\]\(.*?\))/g;
-      const parts = text.split(protectedRegex);
+      
+      // Also protect custom Citation tags [[AI报告]] and [[元信息]] initially to avoid partial matches
+      // Actually, we want to match specific Citation tags first, then Herbs.
+      
+      let processingText = text;
 
-      // 2. Process plain text segments with herbRegex
-      const processedText = parts.map(part => {
+      // 2. Identify Herbs and Citations
+      // Replace Citation Tags with HTML markers we can intercept
+      processingText = processingText.replace(/\[\[AI报告\]\]/g, '<span data-citation="report">[[AI报告]]</span>');
+      processingText = processingText.replace(/\[\[元信息\]\]/g, '<span data-citation="meta">[[元信息]]</span>');
+
+      const parts = processingText.split(protectedRegex);
+
+      // 3. Process plain text segments with herbRegex
+      const finalHtmlString = parts.map(part => {
           if (part.match(protectedRegex)) return part;
-          // Replace herbs with a specific span marker that we can intercept in the ReactMarkdown components
+          if (part.includes('data-citation')) return part; // Skip citation tags we just added
+          
+          // Replace herbs with a specific span marker
           return part.replace(herbRegex, (match) => `<span data-herb="${match}">${match}</span>`);
       }).join('');
       
@@ -141,6 +172,12 @@ const ChatMessageItem: React.FC<MessageItemProps> = ({
                     if (herbName) {
                         return <HerbPill name={herbName} onClick={onHerbClick || (() => {})} />;
                     }
+                    
+                    const citationType = props['data-citation'] as 'report' | 'meta';
+                    if (citationType) {
+                        return <CitationLink type={citationType} onClick={() => onCitationClick(citationType)} />;
+                    }
+
                     return <span className={className} {...props}>{children}</span>;
                 },
                 a: ({node, href, children, ...props}) => {
@@ -161,7 +198,7 @@ const ChatMessageItem: React.FC<MessageItemProps> = ({
                 ol: ({node, ...props}) => <ol className="list-decimal pl-5 mb-4 space-y-1" {...props} />,
             }}
         >
-            {processedText}
+            {finalHtmlString}
         </ReactMarkdown>
       );
   };
@@ -277,7 +314,9 @@ export const AIChatbot: React.FC<Props> = ({
   onUpdatePrescription,
   onRegenerateReport,
   onHerbClick,
-  settings
+  settings,
+  metaInfo,
+  onUpdateMetaInfo
 }) => {
   const [sessions, setSessions] = useState<Record<string, Session>>({});
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -285,10 +324,13 @@ export const AIChatbot: React.FC<Props> = ({
   const [isLoading, setIsLoading] = useState(false);
   const [isToolExecuting, setIsToolExecuting] = useState(false);
   const [isSavingCloud, setIsSavingCloud] = useState(false);
+  const [showMetaModal, setShowMetaModal] = useState(false);
+  const [viewingReference, setViewingReference] = useState<{type: 'report' | 'meta', content: string} | null>(null);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const messageCountRef = useRef(0);
 
   // === Performance Optimization ===
   // 1. Sort herb names by length desc (to match longest first)
@@ -404,9 +446,20 @@ export const AIChatbot: React.FC<Props> = ({
 
   }, [sessions, activeSessionId, settings]);
 
+  // === Scroll Logic Optimized (Disable Follow Output) ===
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [sessions, activeSessionId, isLoading, isToolExecuting]);
+    const currentMsgs = activeSessionId ? sessions[activeSessionId]?.messages || [] : [];
+    
+    // Only scroll if:
+    // 1. Session ID changed (switched chat)
+    // 2. Message COUNT increased (new user msg or new AI start msg)
+    // We intentionally ignore content updates (streaming) to avoid following output
+    
+    if (messageCountRef.current !== currentMsgs.length) {
+        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+        messageCountRef.current = currentMsgs.length;
+    }
+  }, [sessions, activeSessionId]); // Note: dependency on sessions still needed to detect count change
 
   useEffect(() => {
     if (textareaRef.current) {
@@ -595,6 +648,11 @@ export const AIChatbot: React.FC<Props> = ({
      const currentHistory = [...sessions[activeSessionId].messages, userMsg];
      await runGeneration(activeSessionId, currentHistory);
   };
+  
+  const handleCitationClick = (type: 'report' | 'meta') => {
+      const content = type === 'report' ? (reportContent || '暂无报告') : (metaInfo || '暂无元信息');
+      setViewingReference({ type, content });
+  };
 
   // --- Core Generation Logic (Recursive for Tools) ---
   const runGeneration = async (sessionId: string, history: Message[]) => {
@@ -638,7 +696,8 @@ export const AIChatbot: React.FC<Props> = ({
               prescriptionInput, 
               reportContent, 
               settings, 
-              controller.signal
+              controller.signal,
+              metaInfo
           );
 
           let fullText = '';
@@ -754,6 +813,35 @@ export const AIChatbot: React.FC<Props> = ({
   return (
     <div className="flex h-full bg-white rounded-2xl shadow-xl overflow-hidden border border-slate-200">
       
+      <MetaInfoModal 
+         isOpen={showMetaModal}
+         onClose={() => setShowMetaModal(false)}
+         metaInfo={metaInfo}
+         onSave={onUpdateMetaInfo}
+      />
+      
+      {/* Reference Modal (Report/Meta Viewer) */}
+      {viewingReference && (
+          <div className="fixed inset-0 z-[110] flex items-center justify-center p-4">
+              <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm" onClick={() => setViewingReference(null)}></div>
+              <div className="relative bg-white w-full max-w-4xl h-[80vh] rounded-2xl shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95" onClick={e => e.stopPropagation()}>
+                  <div className="bg-slate-50 p-4 border-b border-slate-200 flex justify-between items-center">
+                      <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                          {viewingReference.type === 'report' ? '📑 AI分析报告原文' : '🧠 研讨元信息上下文'}
+                      </h3>
+                      <button onClick={() => setViewingReference(null)} className="text-slate-400 hover:text-slate-600">✕</button>
+                  </div>
+                  <div className="flex-1 overflow-y-auto p-6 custom-scrollbar bg-white">
+                     {viewingReference.type === 'report' ? (
+                         <div className="prose prose-slate max-w-none" dangerouslySetInnerHTML={{__html: viewingReference.content}}></div>
+                     ) : (
+                         <div className="whitespace-pre-wrap text-slate-700 leading-relaxed">{viewingReference.content}</div>
+                     )}
+                  </div>
+              </div>
+          </div>
+      )}
+
       {/* Sidebar (Session List) */}
       <div className="w-64 bg-slate-50 border-r border-slate-200 hidden md:flex flex-col">
         <div className="p-4 border-b border-slate-200">
@@ -813,7 +901,15 @@ export const AIChatbot: React.FC<Props> = ({
              </h3>
            </div>
            
-           <div className="flex items-center gap-2">
+           <div className="flex items-center gap-3">
+               <button 
+                 onClick={() => setShowMetaModal(true)}
+                 className={`hidden md:flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-bold transition-colors ${metaInfo ? 'bg-amber-100 text-amber-800 border-amber-200 shadow-sm' : 'bg-white text-slate-500 border-slate-200 hover:bg-amber-50 hover:text-amber-600'}`}
+                 title="设置研讨上下文"
+               >
+                   <span>🧠</span> {metaInfo ? '元信息已设定' : '设置元信息'}
+               </button>
+
                <button 
                    onClick={handleManualSave}
                    disabled={isSavingCloud || !settings.supabaseKey}
@@ -849,10 +945,12 @@ export const AIChatbot: React.FC<Props> = ({
                  onEdit={handleEditMessage}
                  onContinue={handleContinue}
                  onHerbClick={onHerbClick}
+                 onCitationClick={handleCitationClick}
                  herbRegex={herbRegex}
                />
              ))
            )}
+           {/* Only used for initial scroll position, not active following */}
            <div ref={messagesEndRef} className="h-4" />
         </div>
         

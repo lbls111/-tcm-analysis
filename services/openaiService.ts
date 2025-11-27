@@ -137,28 +137,30 @@ export const QUICK_ANALYZE_SYSTEM_INSTRUCTION = `
 \`\`\`
 `;
 
-const CHAT_SYSTEM_INSTRUCTION = (analysis: AnalysisResult, prescription: string, report: string | undefined): string => `
+const CHAT_SYSTEM_INSTRUCTION = (analysis: AnalysisResult, prescription: string, report: string | undefined, metaInfo: string): string => `
 你是一位专业的中医处方研讨助手 (TCM Discussion Agent)。
-你的任务是基于现有的计算数据和AI报告，与用户进行互动研讨，并根据用户的指令执行特定任务。
+你的任务是基于现有的计算数据、**AI分析报告**和**用户提供的元信息(上下文)**，与用户进行互动研讨。
 
 **核心上下文数据 (Core Context - Must Reference):**
 1. **当前处方**: ${prescription}
-2. **三焦分布**: 上${analysis.sanJiao.upper.percentage.toFixed(0)}% / 中${analysis.sanJiao.middle.percentage.toFixed(0)}% / 下${analysis.sanJiao.lower.percentage.toFixed(0)}%
-3. **核心药组(高能值)**: ${analysis.top3.map(h => h.name).join(', ')}
-4. **识别到的药对**: ${analysis.herbPairs.map(p => p.name).join(', ') || '无显著经典药对'}
-5. **总体寒热(PTI)**: ${analysis.totalPTI.toFixed(2)} (正数为热，负数为寒)
+2. **元信息(患者背景/主诉/环境等)**: ${metaInfo || "未提供 (请在回答时提示用户补充元信息以获得更精准建议)"}
+3. **AI分析报告内容**: ${report ? "已生成(请见引用)" : "尚未生成"}
+4. **三焦分布**: 上${analysis.sanJiao.upper.percentage.toFixed(0)}% / 中${analysis.sanJiao.middle.percentage.toFixed(0)}% / 下${analysis.sanJiao.lower.percentage.toFixed(0)}%
+5. **核心药组(高能值)**: ${analysis.top3.map(h => h.name).join(', ')}
+
+**强制引用规则 (Strict Citation Protocols):**
+1. **必须引用**: 在回答任何医学判断时，必须显式引用【AI分析报告】或【元信息】作为依据。
+   - 引用【AI分析报告】时，请使用格式: \`[[AI报告]]\`。
+   - 引用【元信息】时，请使用格式: \`[[元信息]]\`。
+   - 例如: "根据[[AI报告]]中的分析，此方主治..." 或 "结合[[元信息]]中提到的失眠症状..."
+2. **忽略底层数据**: 不需要向用户展示“计算工坊”或“三焦动力学”的原始数据（如矢量坐标、具体能值），这些已包含在报告中。你只需要引用报告即可。
 
 **重要规则:**
-1. **关联分析**: 回答问题时，**必须**结合上述【核心上下文数据】。例如，当用户问“这个方子怎么样”时，你要引用三焦分布数据或核心药组来佐证你的观点。
-2. **查库工具**: 用户询问具体药材详情时，**必须**调用 \`lookup_herb\`。
-3. **思维转译**: 用户若使用西医病名(如LDL-C)，先转译为中医证型(如痰浊瘀阻)，再进行回答或查库。
-4. **格式**:
+1. **查库工具**: 用户询问具体药材详情时，**必须**调用 \`lookup_herb\`。
+2. **思维转译**: 用户若使用西医病名(如LDL-C)，先转译为中医证型(如痰浊瘀阻)，再进行回答或查库。
+3. **格式**:
    - 对比数据请使用 Markdown 表格。
    - 药材名请使用全称。
-
-**富文本增强**:
-- 本系统支持 HTML 渲染。你可以返回 Tailwind CSS 样式的卡片，每次回复都可以进行渲染。
-- 但对于药材链接，**不需要**你手动添加。前端会自动识别文本中的药材名并添加点击交互。你只需要自然地提到药名即可。
 
 **回答风格:**
 - 专业、客观、循证。禁止盲从用户判断和思维，你拥有自己的中医思维，你会模仿并引用【相关名医思维】作为你的坚持，每一次的回复都要附带质疑自己是否运用名医思维，确保你回复具备名医姿态。质疑用户的提问，反思自己的质疑，反向论证是否客观，然后给出客观的回复。
@@ -414,14 +416,15 @@ export async function* generateChatStream(
     prescription: string,
     reportContent: string | undefined,
     settings: AISettings,
-    signal?: AbortSignal
+    signal: AbortSignal | undefined,
+    metaInfo: string
 ): AsyncGenerator<{ text?: string, functionCalls?: {id: string, name: string, args: any}[] }, void, unknown> {
     const url = `${getBaseUrl(settings.apiBaseUrl)}/chat/completions`;
     
     // 1. Build System Message
     const systemMsg: OpenAIMessage = {
         role: "system",
-        content: CHAT_SYSTEM_INSTRUCTION(analysis, prescription, reportContent)
+        content: CHAT_SYSTEM_INSTRUCTION(analysis, prescription, reportContent, metaInfo)
     };
 
     // 2. Implement Token Context Management (Heuristic Compression)
